@@ -678,7 +678,9 @@ def run_one_file_export(sketch, target_profiles, opts):
 
     # Rotate each piece to its fit orientation, then translate into a single
     # column (Y) or row (X). Fit already guarantees width <= bedW, height <= bedH.
-    groups_spec, all_fids, labels = [], [], []
+    # Fiducials go INTO the piece's own color group so they cut with the piece;
+    # only the piece-index letters use the separate (red) group.
+    groups_spec, labels = [], []
     colors = palettelib.distinct_colors(len(final))
     cursor = 0.0
     for i, p in enumerate(final):
@@ -697,16 +699,16 @@ def run_one_file_export(sketch, target_profiles, opts):
             cursor += h + gap
         outer_t = geom.translate_element(outer, dx, dy)
         holes_t = [geom.translate_element(x, dx, dy) for x in holes]
-        all_fids.extend(geom.translate_element(x, dx, dy) for x in fids)
+        fids_t = [geom.translate_element(x, dx, dy) for x in fids]
         groups_spec.append({
-            "elements": [outer_t] + holes_t, "stroke": colors[i],
+            "elements": [outer_t] + holes_t + fids_t, "stroke": colors[i],
             "layer": "PIECE_%s" % p["letter"], "color": palettelib.aci_color(i)})
         if opts["label_on_pieces"]:
             lh = _label_height_cm(outer_t)
             labels.append((p["letter"], (center[0] + dx, center[1] + dy), lh))
 
     doc, ext = _render_groups_doc(groups_spec, unit, fmt, sw,
-                                  all_fids or None, labels or None)
+                                  None, labels or None)
     path = os.path.join(folder, "%s.%s" % (base, ext))
     with open(path, "w", encoding="utf-8") as fp:
         fp.write(doc)

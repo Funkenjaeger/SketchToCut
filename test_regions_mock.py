@@ -351,6 +351,27 @@ def scenario_one_file():
     check(abs(h - (4 * 4 + 3 * 0.5)) < 1e-6, "pieces stacked, not overlapping")
 
 
+def scenario_one_file_fiducials():
+    print("scenario_one_file_fiducials (fiducials in piece color, letters red):")
+    left = Profile([Loop([line_pc((0, 0), (5, 0)), line_pc((5, 0), (5, 4)),
+                          line_pc((5, 4), (0, 4)), line_pc((0, 4), (0, 0))], True)])
+    right = Profile([Loop([line_pc((5, 0), (10, 0)), line_pc((10, 0), (10, 4)),
+                           line_pc((10, 4), (5, 4)), line_pc((5, 4), (5, 0))], True)])
+    d = tempfile.mkdtemp()
+    m.run_one_file_export(Sketch([left, right]), [left, right],
+                          opts(d, "onefid", unit="cm", bed_w=24, bed_h=24,
+                               bed_w_cm=24, bed_h_cm=24, fid=True, labels=True))
+    out = read(d, "onefid.svg")
+    strokes = [s.upper() for s in
+               re.findall(r'<g fill="none" stroke="(#[0-9A-Fa-f]{6})"', out)]
+    check("#FF0000" not in strokes, "red blacklisted from piece palette")
+    check(out.count("<path") > 2, "fiducial ticks present as paths (>2 with 2 pieces)")
+    fidgrp = out.split('class="fiducial"')[1]
+    check("<text" in fidgrp, "letters live in the separate red group")
+    check("<path" not in fidgrp,
+          "fiducial ticks are NOT in the red group (moved to piece color)")
+
+
 def scenario_dxf():
     print("scenario_dxf (DXF output through tiling + fiducials):")
     piece = Profile([Loop(rect_pcs(0, 0, 30, 30), True)])
@@ -375,6 +396,7 @@ def main():
     scenario_minsize()
     scenario_fiducial_drop()
     scenario_one_file()
+    scenario_one_file_fiducials()
     scenario_dxf()
     scenario_trim()
     print()
