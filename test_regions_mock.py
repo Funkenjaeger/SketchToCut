@@ -2,7 +2,7 @@
 
 Fakes just the slice of adsk.core / adsk.fusion that extract_regions and
 run_per_region_export touch, then drives the REAL add-in code. Scenarios:
-  * split      -- rectangle cut in two: shared-edge fiducials, A/B + MASTER.
+  * split      -- rectangle cut in two: shared-edge fiducials, A/B + ASSEMBLY.
   * hole       -- square with a circular hole: void-disc suppressed, one file.
   * fit        -- auto-rotate to fit, oversized piece skipped.
   * trim       -- region whose top edge is only PART of a long line; must use
@@ -189,6 +189,15 @@ def read(folder, name):
         return fp.read()
 
 
+def has_fiducials(text):
+    # In fill mode a piece's fiducial ticks are a stroked group in piece color.
+    return 'fill="none" stroke="#' in text
+
+
+def _dim(text, name):
+    return float(attr(text, name).rstrip("cm"))
+
+
 def scenario_split():
     print("scenario_split (10x4 rectangle cut at x=5 -> A|B):")
     left = Profile([Loop([line_pc((0, 0), (5, 0)), line_pc((5, 0), (5, 4)),
@@ -199,16 +208,16 @@ def scenario_split():
     summary = m.run_per_region_export(Sketch([left, right]), [left, right],
                                       opts(d, "split"))
     files = sorted(os.listdir(d))
-    check(files == ["split_A.svg", "split_B.svg", "split_MASTER.svg"],
-          "wrote A, B, MASTER (got %s)" % files)
+    check(files == ["split_A.svg", "split_ASSEMBLY.svg", "split_B.svg"],
+          "wrote A, B, ASSEMBLY (got %s)" % files)
     a = read(d, "split_A.svg")
-    check('class="fiducial"' in a, "piece A has a fiducial group (shared edge)")
-    check("Z" in attr(a, "d"), "piece A outline is a closed path")
-    master = read(d, "split_MASTER.svg")
-    check(">A<" in master, "master labels A")
-    # Master's fiducial group carries both the labels AND the tick paths.
-    fid_group = master.split('class="fiducial"')[1]
-    check("<path" in fid_group, "master fiducial group includes tick paths")
+    check(has_fiducials(a), "piece A carries fiducial ticks (in piece color)")
+    check("Z" in attr(a, "d"), "piece A outline is a closed filled path")
+    check('fill-rule="evenodd"' in a or 'fill="#' in a, "piece A is filled")
+    assembly = read(d, "split_ASSEMBLY.svg")
+    check(">A<" in assembly and ">B<" in assembly, "assembly labels A and B")
+    check('class="label"' in assembly and not has_fiducials(assembly),
+          "assembly has letters (label group), no fiducials")
     check("Pieces: A, B" in summary, "summary lists A, B")
 
 
@@ -220,10 +229,11 @@ def scenario_hole():
     m.run_per_region_export(Sketch([ring, disc]), [ring, disc],
                             opts(d, "holed", bed_w=8, bed_h=8, bed_w_cm=8, bed_h_cm=8))
     files = sorted(os.listdir(d))
-    check(files == ["holed.svg"], "single region -> base.svg, no _A/MASTER: %s" % files)
+    check(files == ["holed.svg"],
+          "single region -> base.svg, no _A/ASSEMBLY: %s" % files)
     a = read(d, "holed.svg")
-    check("<circle" in a, "hole present as a circle")
-    check(a.count("<path") >= 1, "outer square present as a path")
+    check('fill-rule="evenodd"' in a, "hole -> even-odd fill")
+    check(attr(a, "d").count("M") == 2, "compound path: outer + hole subpaths")
 
 
 def scenario_fit():
@@ -240,10 +250,6 @@ def scenario_fit():
           "8x3 auto-rotated 90deg -> width 3cm")
 
 
-def _dim(text, name):
-    return float(attr(text, name).rstrip("cm"))
-
-
 def scenario_tile():
     print("scenario_tile (30x30 region tiled into a 12x24 bed):")
     piece = Profile([Loop(rect_pcs(0, 0, 30, 30), True)])
@@ -252,17 +258,17 @@ def scenario_tile():
         Sketch([piece]), [piece],
         opts(d, "big", unit="cm", bed_w=12, bed_h=24, bed_w_cm=12, bed_h_cm=24,
              fid=True))
-    tiles = sorted(f for f in os.listdir(d) if not f.endswith("MASTER.svg"))
+    tiles = sorted(f for f in os.listdir(d) if not f.endswith("ASSEMBLY.svg"))
     check(len(tiles) == 6, "30x30 -> ceil(30/12) x ceil(30/24) = 6 tiles (got %d)"
           % len(tiles))
     check("auto-tiled" in summary, "summary reports auto-tiling")
     fits = all(_dim(read(d, f), "width") <= 12 + 1e-6
                and _dim(read(d, f), "height") <= 24 + 1e-6 for f in tiles)
     check(fits, "every tile fits within the 12x24 bed")
-    check(any('class="fiducial"' in read(d, f) for f in tiles),
-          "tiles carry cut-edge fiducials")
-    check('class="fiducial"' in read(d, "big_MASTER.svg"),
-          "master shows the tile fiducials")
+    check(any(has_fiducials(read(d, f)) for f in tiles),
+          "tiles carry cut-edge fiducials (piece color)")
+    check(os.path.exists(os.path.join(d, "big_ASSEMBLY.svg")),
+          "an ASSEMBLY reference is written")
 
 
 def scenario_trim():
@@ -298,8 +304,8 @@ def scenario_fiducial_drop():
     m.run_per_region_export(Sketch([a, b]), [a, b],
                             opts(d, "thin", unit="cm", bed_w=24, bed_h=24,
                                  bed_w_cm=24, bed_h_cm=24, fid=True))
-    files = [f for f in os.listdir(d) if not f.endswith("MASTER.svg")]
-    check(not any('class="fiducial"' in read(d, f) for f in files),
+    files = [f for f in os.listdir(d) if not f.endswith("ASSEMBLY.svg")]
+    check(not any(has_fiducials(read(d, f)) for f in files),
           "shared fiducial pair dropped from BOTH the thin and thick piece")
 
 
@@ -314,7 +320,7 @@ def scenario_minsize():
                             opts(d0, "nomin", unit="cm", bed_w=12, bed_h=24,
                                  bed_w_cm=12, bed_h_cm=24, fid=False))
     w0 = [_dim(read(d0, f), "width") for f in os.listdir(d0)
-          if not f.endswith("MASTER.svg")]
+          if not f.endswith("ASSEMBLY.svg")]
     check(min(w0) < 2, "without min-size a <2cm sliver appears (min width %.2f)"
           % min(w0))
 
@@ -324,7 +330,7 @@ def scenario_minsize():
     o1["tile_min_size_cm"] = 3.0
     m.run_per_region_export(Sketch([piece]), [piece], o1)
     w1 = [_dim(read(d1, f), "width") for f in os.listdir(d1)
-          if not f.endswith("MASTER.svg")]
+          if not f.endswith("ASSEMBLY.svg")]
     check(min(w1) >= 3 - 1e-6,
           "with min-size 3, no tile narrower than 3cm (min width %.2f)" % min(w1))
 
@@ -339,11 +345,12 @@ def scenario_one_file():
     m.run_one_file_export(Sketch(ps), ps,
                           opts(d, "onefile", unit="cm", bed_w=12, bed_h=24,
                                bed_w_cm=12, bed_h_cm=24, fid=False))
-    files = os.listdir(d)
-    check(files == ["onefile.svg"], "single combined file (got %s)" % files)
+    files = sorted(os.listdir(d))
+    check(files == ["onefile.svg", "onefile_ASSEMBLY.svg"],
+          "combined file + assembly (got %s)" % files)
     out = read(d, "onefile.svg")
-    strokes = set(re.findall(r'<g fill="none" stroke="(#[0-9A-Fa-f]{6})"', out))
-    check(len(strokes) == 4, "4 distinct piece colors (got %d)" % len(strokes))
+    fills = set(re.findall(r'fill="(#[0-9A-Fa-f]{6})"', out))
+    check(len(fills) == 4, "4 distinct piece fill colors (got %d)" % len(fills))
     w = _dim(out, "width")
     check(w <= 12 + 1e-6, "Y-arrange: canvas width <= bedW 12cm (got %.2f)" % w)
     # Stacked (not piled): total height ~ sum of 4x4 heights + 3 gaps of 0.5.
@@ -362,14 +369,14 @@ def scenario_one_file_fiducials():
                           opts(d, "onefid", unit="cm", bed_w=24, bed_h=24,
                                bed_w_cm=24, bed_h_cm=24, fid=True, labels=True))
     out = read(d, "onefid.svg")
-    strokes = [s.upper() for s in
-               re.findall(r'<g fill="none" stroke="(#[0-9A-Fa-f]{6})"', out)]
-    check("#FF0000" not in strokes, "red blacklisted from piece palette")
-    check(out.count("<path") > 2, "fiducial ticks present as paths (>2 with 2 pieces)")
-    fidgrp = out.split('class="fiducial"')[1]
-    check("<text" in fidgrp, "letters live in the separate red group")
-    check("<path" not in fidgrp,
-          "fiducial ticks are NOT in the red group (moved to piece color)")
+    fills = [c.upper() for c in re.findall(r'fill="(#[0-9A-Fa-f]{6})"', out)]
+    check("#FF0000" not in fills, "no piece fill is red (red reserved)")
+    check(has_fiducials(out), "fiducial ticks present (piece-color stroke group)")
+    fid_strokes = [c.upper() for c in re.findall(r'stroke="(#[0-9A-Fa-f]{6})"', out)]
+    check("#FF0000" not in fid_strokes, "no fiducial stroke is red")
+    labelgrp = out.split('class="label"')[1]
+    check("<text" in labelgrp, "letters live in the separate red label group")
+    check("<path" not in labelgrp, "no cut paths in the label group")
 
 
 def scenario_dxf():
@@ -382,8 +389,8 @@ def scenario_dxf():
              bed_h_cm=24, fid=True, fmt="dxf"))
     files = sorted(os.listdir(d))
     check(all(f.endswith(".dxf") for f in files), "all outputs are .dxf: %s" % files)
-    check(any(f == "laser_MASTER.dxf" for f in files), "DXF master emitted")
-    sample = read(d, [f for f in files if f != "laser_MASTER.dxf"][0])
+    check(any(f == "laser_ASSEMBLY.dxf" for f in files), "DXF assembly emitted")
+    sample = read(d, [f for f in files if f != "laser_ASSEMBLY.dxf"][0])
     check("POLYLINE" in sample and sample.rstrip().endswith("EOF"),
           "a tile DXF is well-formed (POLYLINE + EOF)")
 

@@ -91,29 +91,40 @@ def _tile_to_piece(tile, opts):
             "centroid": centroid, "fiducials": fids, "_theta": 0.0}
 
 
-def _render_doc(elements, unit, fmt, stroke_width, fid_color="red",
-                fiducials=None, labels=None):
-    """Render IR elements to the chosen format; returns (text, extension)."""
-    if fmt == "dxf":
-        return (dxfwriter.render(elements, unit=unit, fiducials=fiducials,
-                                 labels=labels), "dxf")
-    return (svgwriter.render(elements, unit=unit, stroke_width=stroke_width,
-                             fiducials=fiducials, fiducial_stroke=fid_color,
-                             labels=labels), "svg")
+def _piece_group(p, rotate=True, dx=0.0, dy=0.0, with_fiducials=True):
+    """A render-ready group for a piece: geometry optionally rotated (to its fit
+    orientation) and translated, tagged with its palette color / DXF layer."""
+    theta = p["_theta"] if rotate else 0.0
+    center = p["centroid"]
+
+    def tf(e):
+        if rotate:
+            e = geom.rotate_element(e, theta, center)
+        if dx or dy:
+            e = geom.translate_element(e, dx, dy)
+        return e
+
+    fids = [tf(f) for f in p.get("fiducials", [])] if with_fiducials else []
+    return {"outer": tf(p["outer"]), "holes": [tf(h) for h in p["holes"]],
+            "fiducials": fids, "color": p["color"], "aci": p["aci"],
+            "layer": "PIECE_%s" % p["letter"]}
 
 
-def _render_groups_doc(groups_spec, unit, fmt, stroke_width, fiducials=None,
+def _render_pieces_doc(piece_groups, unit, fmt, stroke_width, filled=True,
                        labels=None):
-    """Render multi-color/-layer groups to the chosen format; (text, extension)."""
+    """Render piece groups to the chosen format; returns (text, extension).
+
+    SVG uses filled shapes with per-piece color; DXF stays wireframe (laser cuts
+    paths, not fills) with each piece on its own layer/color.
+    """
     if fmt == "dxf":
-        groups = [{"elements": g["elements"], "layer": g["layer"],
-                   "color": g["color"]} for g in groups_spec]
-        return (dxfwriter.render_groups(groups, unit=unit, fiducials=fiducials,
-                                        labels=labels), "dxf")
-    groups = [{"elements": g["elements"], "stroke": g["stroke"]}
-              for g in groups_spec]
-    return (svgwriter.render_groups(groups, unit=unit, stroke_width=stroke_width,
-                                    fiducials=fiducials, labels=labels), "svg")
+        groups = [{"elements": [g["outer"]] + g["holes"] + g["fiducials"],
+                   "layer": g["layer"], "color": g["aci"]}
+                  for g in piece_groups]
+        return (dxfwriter.render_groups(groups, unit=unit, labels=labels), "dxf")
+    return (svgwriter.render_pieces(piece_groups, unit=unit,
+                                    stroke_width=stroke_width, filled=filled,
+                                    labels=labels), "svg")
 
 # --- constants -------------------------------------------------------------
 CMD_ID = "SketchToSVG_ExportCmd"
@@ -584,8 +595,11 @@ def _build_final_pieces(sketch, target_profiles, opts):
         return [], info
 
     final.sort(key=lambda q: (-q["centroid"][1], q["centroid"][0]))
+    colors = palettelib.distinct_colors(len(final))
     for i, q in enumerate(final):
         q["letter"] = _letter(i)
+        q["color"] = colors[i]           # same color across piece file + assembly
+        q["aci"] = palettelib.aci_color(i)
     _drop_unfitting_fiducials(final)
 
     info["n_tiled"] = n_tiled
@@ -609,87 +623,76 @@ def _tile_note(info, opts):
     return lines
 
 
+def _write_assembly(final, opts, unit, sw, fmt, folder, base):
+    """Write {base}_ASSEMBLY: filled pieces in ORIGINAL position + letters.
+
+    Uses each piece's palette color (matching the cut files) so you can map a
+    color back to where it belongs. No fiducials (they'd vanish on the fills).
+    """
+    apgs = [_piece_group(p, rotate=False, with_fiducials=False) for p in final]
+    labels = [(p["letter"], p["centroid"], _label_height_cm(p["outer"]))
+              for p in final]
+    doc, ext = _render_pieces_doc(apgs, unit, fmt, sw, filled=True, labels=labels)
+    with open(os.path.join(folder, "%s_ASSEMBLY.%s" % (base, ext)),
+              "w", encoding="utf-8") as fp:
+        fp.write(doc)
+
+
 def run_per_region_export(sketch, target_profiles, opts):
-    """One file per piece + a MASTER assembly map. Returns a summary."""
+    """One file per piece + an ASSEMBLY reference. Returns a summary."""
     final, info = _build_final_pieces(sketch, target_profiles, opts)
     if info["error"]:
         return info["error"]
 
     unit, sw = opts["unit"], opts["stroke_width"]
     fmt = opts.get("fmt", "svg")
-    ext = "dxf" if fmt == "dxf" else "svg"
     folder, base = opts["folder"], opts["base"]
     single = len(final) == 1
 
-    written = []
-    master_elements, master_labels, master_fiducials = [], [], []
+    written, ext = [], "svg"
     for p in final:
-        letter = p["letter"]
-        lh = _label_height_cm(p["outer"])
-        master_elements.append(p["outer"])
-        master_elements.extend(p["holes"])
-        master_labels.append((letter, p["centroid"], lh))
-        master_fiducials.extend(p.get("fiducials", []))
-
-        theta, center = p["_theta"], p["centroid"]
-        outer_r = geom.rotate_element(p["outer"], theta, center)
-        holes_r = [geom.rotate_element(h, theta, center) for h in p["holes"]]
-        fids_r = [geom.rotate_element(f, theta, center)
-                  for f in p.get("fiducials", [])]
-        labels = ([(letter, center, lh)]
-                  if opts["label_on_pieces"] and not single else None)
-        doc, _e = _render_doc([outer_r] + holes_r, unit, fmt, sw,
-                              opts["fid_color"], fids_r or None, labels)
-        fname = "%s.%s" % (base, ext) if single else "%s_%s.%s" % (base, letter, ext)
+        pg = _piece_group(p, rotate=True)
+        lbls = ([(p["letter"], p["centroid"], _label_height_cm(p["outer"]))]
+                if opts["label_on_pieces"] and not single else None)
+        doc, ext = _render_pieces_doc([pg], unit, fmt, sw, filled=True, labels=lbls)
+        fname = "%s.%s" % (base, ext) if single \
+            else "%s_%s.%s" % (base, p["letter"], ext)
         with open(os.path.join(folder, fname), "w", encoding="utf-8") as fp:
             fp.write(doc)
-        written.append(letter)
-
-    if not single:
-        master_doc, _e = _render_doc(
-            master_elements, unit, fmt, sw, opts["fid_color"],
-            master_fiducials or None, master_labels)
-        with open(os.path.join(folder, "%s_MASTER.%s" % (base, ext)),
-                  "w", encoding="utf-8") as fp:
-            fp.write(master_doc)
+        written.append(p["letter"])
 
     if single:
-        lines = ["Exported 1 piece to:\n%s" % os.path.join(
-            folder, "%s.%s" % (base, ext))]
+        lines = ["Exported 1 piece to:\n%s"
+                 % os.path.join(folder, "%s.%s" % (base, ext))]
     else:
-        lines = ["Exported %d piece file(s) + %s_MASTER.%s to:\n%s\n" % (
-            len(written), base, ext, folder)]
+        _write_assembly(final, opts, unit, sw, fmt, folder, base)
+        lines = ["Exported %d piece file(s) + %s_ASSEMBLY.%s to:\n%s\n"
+                 % (len(written), base, ext, folder)]
         lines.append("Pieces: %s" % ", ".join(written))
     return "\n".join(lines + _tile_note(info, opts))
 
 
 def run_one_file_export(sketch, target_profiles, opts):
-    """Pack all pieces into ONE multi-color file, arranged along an axis."""
+    """Pack all pieces into ONE multi-color file (+ ASSEMBLY). Returns a summary."""
     final, info = _build_final_pieces(sketch, target_profiles, opts)
     if info["error"]:
         return info["error"]
 
     unit, sw = opts["unit"], opts["stroke_width"]
     fmt = opts.get("fmt", "svg")
-    ext = "dxf" if fmt == "dxf" else "svg"
     axis = opts.get("arrange_axis", "Y")
     folder, base = opts["folder"], opts["base"]
     gap = 0.5  # cm between packed pieces
 
-    # Rotate each piece to its fit orientation, then translate into a single
+    # Rotate each piece to its fit orientation, then translate it into a single
     # column (Y) or row (X). Fit already guarantees width <= bedW, height <= bedH.
-    # Fiducials go INTO the piece's own color group so they cut with the piece;
-    # only the piece-index letters use the separate (red) group.
-    groups_spec, labels = [], []
-    colors = palettelib.distinct_colors(len(final))
+    piece_groups, labels = [], []
     cursor = 0.0
-    for i, p in enumerate(final):
+    for p in final:
         theta, center = p["_theta"], p["centroid"]
-        outer = geom.rotate_element(p["outer"], theta, center)
-        holes = [geom.rotate_element(h, theta, center) for h in p["holes"]]
-        fids = [geom.rotate_element(f, theta, center)
-                for f in p.get("fiducials", [])]
-        minx, miny, maxx, maxy = geom.bounding_box([outer] + holes)
+        outer_r = geom.rotate_element(p["outer"], theta, center)
+        holes_r = [geom.rotate_element(h, theta, center) for h in p["holes"]]
+        minx, miny, maxx, maxy = geom.bounding_box([outer_r] + holes_r)
         w, h = maxx - minx, maxy - miny
         if axis == "X":
             dx, dy = cursor - minx, -miny
@@ -697,27 +700,26 @@ def run_one_file_export(sketch, target_profiles, opts):
         else:  # Y
             dx, dy = -minx, cursor - miny
             cursor += h + gap
-        outer_t = geom.translate_element(outer, dx, dy)
-        holes_t = [geom.translate_element(x, dx, dy) for x in holes]
-        fids_t = [geom.translate_element(x, dx, dy) for x in fids]
-        groups_spec.append({
-            "elements": [outer_t] + holes_t + fids_t, "stroke": colors[i],
-            "layer": "PIECE_%s" % p["letter"], "color": palettelib.aci_color(i)})
+        piece_groups.append(_piece_group(p, rotate=True, dx=dx, dy=dy))
         if opts["label_on_pieces"]:
-            lh = _label_height_cm(outer_t)
-            labels.append((p["letter"], (center[0] + dx, center[1] + dy), lh))
+            labels.append((p["letter"], (center[0] + dx, center[1] + dy),
+                           _label_height_cm(p["outer"])))
 
-    doc, ext = _render_groups_doc(groups_spec, unit, fmt, sw,
-                                  None, labels or None)
-    path = os.path.join(folder, "%s.%s" % (base, ext))
-    with open(path, "w", encoding="utf-8") as fp:
+    doc, ext = _render_pieces_doc(piece_groups, unit, fmt, sw, filled=True,
+                                  labels=labels or None)
+    with open(os.path.join(folder, "%s.%s" % (base, ext)),
+              "w", encoding="utf-8") as fp:
         fp.write(doc)
+    if len(final) > 1:
+        _write_assembly(final, opts, unit, sw, fmt, folder, base)
 
-    all_elems = [e for gspec in groups_spec for e in gspec["elements"]]
+    all_elems = [e for pg in piece_groups for e in [pg["outer"]] + pg["holes"]]
     bb = geom.bounding_box(all_elems)
     scl = geom.cm_to(unit)
-    lines = ["Exported %d piece(s) into one %s file (arranged along %s):\n%s\n"
-             % (len(final), ext.upper(), axis, path)]
+    lines = ["Exported %d piece(s) into %s.%s (arranged along %s)%s:\n%s\n"
+             % (len(final), base, ext, axis,
+                (" + %s_ASSEMBLY.%s" % (base, ext)) if len(final) > 1 else "",
+                folder)]
     lines.append("Overall size: %.2f x %.2f %s (must fit your material area)."
                  % ((bb[2] - bb[0]) * scl, (bb[3] - bb[1]) * scl, unit))
     return "\n".join(lines + _tile_note(info, opts))
@@ -880,7 +882,8 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 "auto-rotated to fit the bed; too-big regions are tiled. "
                 "One file = all pieces in one multi-color file, packed along the "
                 "chosen axis (peel each color onto its own vinyl sheet). "
-                "Per region = one file per piece + a MASTER assembly map. "
+                "Per region = one file per piece. Both also emit an ASSEMBLY "
+                "reference (filled, colored, letters) showing where each fits. "
                 "SVG for the vinyl cutter, DXF for laser/SendCutSend.", 5, True)
 
             # Restore last-used values (overrides the hard-coded defaults above).

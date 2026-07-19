@@ -308,18 +308,27 @@ def test_one_file_core():
     check(all(c.startswith("#") and len(c) == 7 for c in cols), "hex #RRGGBB")
     check(palette.distinct_colors(0) == [], "0 colors -> empty")
 
-    groups = [
-        {"elements": [g.Polyline([(0, 0), (1, 0), (1, 1), (0, 1)], closed=True)],
-         "stroke": "#FF0000"},
-        {"elements": [g.Polyline([(2, 0), (3, 0), (3, 1), (2, 1)], closed=True)],
-         "stroke": "#00FF00"},
+    pieces = [
+        {"outer": g.Polyline([(0, 0), (1, 0), (1, 1), (0, 1)], closed=True),
+         "holes": [], "fiducials": [], "color": "#AA0088"},
+        {"outer": g.Polyline([(2, 0), (3, 0), (3, 1), (2, 1)], closed=True),
+         "holes": [], "fiducials": [], "color": "#0088AA"},
     ]
-    out = svg.render_groups(groups, unit="mm")
-    check(out.count("<g ") == 2, "render_groups emits one group per piece")
-    check("#FF0000" in out and "#00FF00" in out, "both piece colors present")
+    out = svg.render_pieces(pieces, unit="mm", filled=True)
+    check('fill="#AA0088"' in out and 'fill="#0088AA"' in out,
+          "both piece fill colors present")
+    check('stroke="none"' in out, "filled shapes carry no stroke")
     # Two side-by-side unit squares span 3cm -> 30mm wide, 1cm -> 10mm tall.
     check(attr(out, "viewBox") == "0 0 30 10",
-          "render_groups uses one shared bbox (30x10 mm)")
+          "render_pieces uses one shared bbox (30x10 mm)")
+
+    # A piece with a hole -> one compound even-odd path (2 subpaths).
+    holed = svg.render_pieces([{
+        "outer": g.Polyline([(0, 0), (4, 0), (4, 4), (0, 4)], closed=True),
+        "holes": [g.Circle((2, 2), 1)], "fiducials": [], "color": "#123456"}],
+        unit="mm", filled=True)
+    check('fill-rule="evenodd"' in holed and attr(holed, "d").count("M") == 2,
+          "hole -> even-odd compound path (outer + hole subpaths)")
 
 
 def _dxf_pairs(text):

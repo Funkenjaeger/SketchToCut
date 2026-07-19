@@ -79,28 +79,40 @@ def _escape(text):
             .replace(">", "&gt;"))
 
 
-def render_groups(groups, unit="in", stroke_width=0.01, margin=0.0, decimals=4,
-                  fiducials=None, fiducial_stroke="red", labels=None):
-    """Render multiple colored cut-groups into one SVG (shared coordinate frame).
+def _loop_d(e, X, Y, n):
+    """Compound-path ``d`` for one closed loop (flattened to a polygon)."""
+    pts = g.sample_element_points(e)
+    if len(pts) < 3:
+        return ""
+    d = "M %s %s" % (n(X(pts[0][0])), n(Y(pts[0][1])))
+    for p in pts[1:]:
+        d += " L %s %s" % (n(X(p[0])), n(Y(p[1])))
+    return d + " Z"
 
-    ``groups`` is a list of ``{"elements": [...], "stroke": "#RRGGBB"}`` -- each
-    becomes a ``<g>`` in its own color (for multi-color "one file" output). All
-    groups share one bbox/transform (no per-group re-origin). ``fiducials`` and
-    ``labels`` go in a single separate ``class="fiducial"`` group.
+
+def render_pieces(pieces, unit="in", stroke_width=0.01, filled=True,
+                  labels=None, label_stroke="red", margin=0.0, decimals=4):
+    """Render colored pieces into one SVG (shared coordinate frame).
+
+    Each piece is ``{"outer": elem, "holes": [elem...], "fiducials": [Line...],
+    "color": "#RRGGBB"}``. With ``filled`` the shape is filled with its color
+    (holes cut via even-odd) and fiducials are stroked in the same color (a line
+    has no fill area); otherwise everything is stroked. ``labels`` (``(text,
+    (x_cm, y_cm), height_cm)``) render in a separate ``class="label"`` group in
+    ``label_stroke``.
     """
-    fiducials = fiducials or []
     labels = labels or []
-
-    all_elems = []
-    for grp in groups:
-        all_elems.extend(grp.get("elements", []))
-    bbox = g.bounding_box(all_elems + list(fiducials))
+    allelems = []
+    for pc in pieces:
+        allelems.append(pc["outer"])
+        allelems.extend(pc["holes"])
+        allelems.extend(pc.get("fiducials", []))
+    bbox = g.bounding_box(allelems)
     if bbox is None:
         raise ValueError("No geometry to export.")
     minx, miny, maxx, maxy = bbox
     s = g.cm_to(unit)
     suffix = g.unit_suffix(unit)
-
     width = (maxx - minx) * s + 2.0 * margin
     height = (maxy - miny) * s + 2.0 * margin
 
@@ -119,22 +131,89 @@ def render_groups(groups, unit="in", stroke_width=0.01, margin=0.0, decimals=4,
         'width="%s%s" height="%s%s" viewBox="0 0 %s %s">\n' % (
             n(width), suffix, n(height), suffix, n(width), n(height))]
 
-    for grp in groups:
-        parts.append(
-            '<g fill="none" stroke="%s" stroke-width="%s" '
-            'stroke-linecap="round" stroke-linejoin="round">\n' % (
-                grp.get("stroke", "black"), n(stroke_width)))
-        for e in grp.get("elements", []):
-            frag = _element_svg(e, X, Y, n, s)
-            if frag:
-                parts.append(frag + "\n")
+    for pc in pieces:
+        color = pc["color"]
+        fids = pc.get("fiducials", [])
+        if filled:
+            d = " ".join(x for x in (_loop_d(e, X, Y, n)
+                                     for e in [pc["outer"]] + pc["holes"]) if x)
+            if d:
+                parts.append('<path d="%s" fill="%s" stroke="none" '
+                             'fill-rule="evenodd" />\n' % (d, color))
+            if fids:
+                parts.append('<g fill="none" stroke="%s" stroke-width="%s" '
+                             'stroke-linecap="round" stroke-linejoin="round">\n'
+                             % (color, n(stroke_width)))
+                for f in fids:
+                    frag = _element_svg(f, X, Y, n, s)
+                    if frag:
+                        parts.append(frag + "\n")
+                parts.append("</g>\n")
+        else:
+            parts.append('<g fill="none" stroke="%s" stroke-width="%s" '
+                         'stroke-linecap="round" stroke-linejoin="round">\n'
+                         % (color, n(stroke_width)))
+            for e in [pc["outer"]] + pc["holes"] + list(fids):
+                frag = _element_svg(e, X, Y, n, s)
+                if frag:
+                    parts.append(frag + "\n")
+            parts.append("</g>\n")
+
+    if labels:
+        parts.append('<g class="label" fill="%s" stroke="none">\n' % label_stroke)
+        for text, (lx, ly), height_cm in labels:
+            parts.append(
+                '<text x="%s" y="%s" font-size="%s" text-anchor="middle" '
+                'dominant-baseline="central" fill="%s" stroke="none">%s</text>\n' % (
+                    n(X(lx)), n(Y(ly)), n(height_cm * s), label_stroke,
+                    _escape(text)))
         parts.append("</g>\n")
 
+    parts.append("</svg>\n")
+    return "".join(parts)
+
+
+def render(elements, unit="in", stroke_width=0.01, stroke="black",
+           margin=0.0, decimals=4, fiducials=None, fiducial_stroke="red",
+           labels=None):
+    """Single-group stroked SVG (low-level helper; used by the test suite)."""
+    fiducials = fiducials or []
+    labels = labels or []
+    bbox = g.bounding_box(list(elements) + list(fiducials))
+    if bbox is None:
+        raise ValueError("No geometry to export.")
+    minx, miny, maxx, maxy = bbox
+    s = g.cm_to(unit)
+    suffix = g.unit_suffix(unit)
+    width = (maxx - minx) * s + 2.0 * margin
+    height = (maxy - miny) * s + 2.0 * margin
+
+    def X(x):
+        return (x - minx) * s + margin
+
+    def Y(y):
+        return (maxy - y) * s + margin
+
+    def n(v):
+        return _num(v, decimals)
+
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+        '<svg xmlns="http://www.w3.org/2000/svg" version="1.1" '
+        'width="%s%s" height="%s%s" viewBox="0 0 %s %s">\n' % (
+            n(width), suffix, n(height), suffix, n(width), n(height)),
+        '<g fill="none" stroke="%s" stroke-width="%s" stroke-linecap="round" '
+        'stroke-linejoin="round">\n' % (stroke, n(stroke_width))]
+    for e in elements:
+        frag = _element_svg(e, X, Y, n, s)
+        if frag:
+            parts.append(frag + "\n")
+    parts.append("</g>\n")
+
     if fiducials or labels:
-        parts.append(
-            '<g class="fiducial" fill="none" stroke="%s" stroke-width="%s" '
-            'stroke-linecap="round" stroke-linejoin="round">\n' % (
-                fiducial_stroke, n(stroke_width)))
+        parts.append('<g class="fiducial" fill="none" stroke="%s" '
+                     'stroke-width="%s" stroke-linecap="round" '
+                     'stroke-linejoin="round">\n' % (fiducial_stroke, n(stroke_width)))
         for e in fiducials:
             frag = _element_svg(e, X, Y, n, s)
             if frag:
@@ -149,14 +228,3 @@ def render_groups(groups, unit="in", stroke_width=0.01, margin=0.0, decimals=4,
 
     parts.append("</svg>\n")
     return "".join(parts)
-
-
-def render(elements, unit="in", stroke_width=0.01, stroke="black",
-           margin=0.0, decimals=4, fiducials=None, fiducial_stroke="red",
-           labels=None):
-    """Single-group SVG (the per-piece / whole-sketch path). Delegates to
-    :func:`render_groups`."""
-    return render_groups([{"elements": elements, "stroke": stroke}], unit=unit,
-                         stroke_width=stroke_width, margin=margin,
-                         decimals=decimals, fiducials=fiducials,
-                         fiducial_stroke=fiducial_stroke, labels=labels)
