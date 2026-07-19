@@ -248,6 +248,9 @@ def test_rotate_and_centroid():
     rc = g.rotate_element(c, math.pi / 2, center=(0, 0))
     check(approx(rc.center[0], 0) and approx(rc.center[1], 2) and rc.radius == 1,
           "circle rotates about origin, radius unchanged")
+    check(g.point_in_polygon((1, 1), sq), "point inside square")
+    check(not g.point_in_polygon((3, 1), sq), "point outside square")
+    check(not g.point_in_polygon((-1, 1), sq), "point left of square outside")
 
 
 def test_tiling():

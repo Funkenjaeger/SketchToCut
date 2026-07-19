@@ -285,6 +285,24 @@ def scenario_trim():
     check(h == "4cm", "height 4cm (got %s)" % h)
 
 
+def scenario_fiducial_drop():
+    print("scenario_fiducial_drop (tick poking out of a thin piece drops the pair):")
+    # A = 10x0.2 thin strip, B = 10x2 above it, sharing the y=0.2 edge. The
+    # default tick reaches 0.3cm inward -> pokes through A (0.2 thick) -> both
+    # halves of that shared fiducial should be dropped.
+    a = Profile([Loop([line_pc((0, 0), (10, 0)), line_pc((10, 0), (10, 0.2)),
+                       line_pc((10, 0.2), (0, 0.2)), line_pc((0, 0.2), (0, 0))], True)])
+    b = Profile([Loop([line_pc((0, 0.2), (10, 0.2)), line_pc((10, 0.2), (10, 2.2)),
+                       line_pc((10, 2.2), (0, 2.2)), line_pc((0, 2.2), (0, 0.2))], True)])
+    d = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([a, b]), [a, b],
+                            opts(d, "thin", unit="cm", bed_w=24, bed_h=24,
+                                 bed_w_cm=24, bed_h_cm=24, fid=True))
+    files = [f for f in os.listdir(d) if not f.endswith("MASTER.svg")]
+    check(not any('class="fiducial"' in read(d, f) for f in files),
+          "shared fiducial pair dropped from BOTH the thin and thick piece")
+
+
 def scenario_minsize():
     print("scenario_minsize (min tile size prevents grid slivers):")
     # 13x30 region, bed 12x24: doesn't fit -> tiles. Without min, the X axis
@@ -333,6 +351,7 @@ def main():
     scenario_fit()
     scenario_tile()
     scenario_minsize()
+    scenario_fiducial_drop()
     scenario_dxf()
     scenario_trim()
     print()

@@ -44,6 +44,36 @@ def _elem_polygon(elem):
     return geom.sample_element_points(elem)  # circle/ellipse -> polygon
 
 
+def _drop_unfitting_fiducials(pieces):
+    """Drop fiducial ticks that poke out of their piece -- both halves of a pair.
+
+    Ticks are grouped by their base point (``tick.p0`` -- the point on the shared
+    cut, identical for the two adjacent pieces). A tick fits iff its tip
+    (``tick.p1``) is inside its piece's outer polygon and not inside any hole.
+    If any tick in a group fails, the whole group is dropped so a seam never ends
+    up with a lone half-tick.
+    """
+    groups = {}  # base-point key -> list of (id(tick), fits)
+    for p in pieces:
+        outer = _elem_polygon(p["outer"])
+        holes = [_elem_polygon(h) for h in p["holes"]]
+        for t in p.get("fiducials", []):
+            fits = (geom.point_in_polygon(t.p1, outer)
+                    and not any(geom.point_in_polygon(t.p1, h) for h in holes))
+            key = (round(t.p0[0], 4), round(t.p0[1], 4))
+            groups.setdefault(key, []).append((id(t), fits))
+
+    drop = set()
+    for members in groups.values():
+        if not all(fits for _tid, fits in members):
+            drop.update(tid for tid, _fits in members)
+
+    if drop:
+        for p in pieces:
+            if p.get("fiducials"):
+                p["fiducials"] = [t for t in p["fiducials"] if id(t) not in drop]
+
+
 def _tile_to_piece(tile, opts):
     """Turn a tiling.tile_piece() dict into an output-piece dict."""
     outer = geom.Polyline(tile["outer"], closed=True)
@@ -538,6 +568,9 @@ def run_per_region_export(sketch, target_profiles, opts):
     final.sort(key=lambda q: (-q["centroid"][1], q["centroid"][0]))
     for i, q in enumerate(final):
         q["letter"] = _letter(i)
+
+    # Drop fiducial ticks (both halves) that don't fit inside their piece.
+    _drop_unfitting_fiducials(final)
 
     single = len(final) == 1
     written = []

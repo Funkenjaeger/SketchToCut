@@ -189,6 +189,22 @@ def polygon_centroid(points: Sequence[Point]) -> Point:
     return (cx / (6.0 * a), cy / (6.0 * a))
 
 
+def point_in_polygon(pt: Point, poly: Sequence[Point]) -> bool:
+    """Ray-casting point-in-polygon test (poly is a closed ring, no repeat)."""
+    x, y = pt
+    inside = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) and \
+                (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
 def rotate_point(p: Point, theta: float, center: Point = (0.0, 0.0)) -> Point:
     """Rotate a point ``theta`` radians CCW about ``center``."""
     c = math.cos(theta)
