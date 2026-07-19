@@ -19,6 +19,7 @@ from core import dxf
 from core import loops
 from core import fiducials
 from core import fitting
+from core import tiling
 
 
 _failures = []
@@ -249,6 +250,36 @@ def test_rotate_and_centroid():
           "circle rotates about origin, radius unchanged")
 
 
+def test_tiling():
+    print("test_tiling (rect clip + grid split):")
+    sq = [(0, 0), (2, 0), (2, 2), (0, 2)]
+    clipped = tiling.clip_polygon_rect(sq, 1, 0, 2, 2)   # keep right half
+    xs = [p[0] for p in clipped]
+    check(clipped and approx(min(xs), 1) and approx(max(xs), 2),
+          "clip to right half keeps x in [1,2]")
+    check(tiling.clip_polygon_rect(sq, 5, 5, 6, 6) == [],
+          "clip fully outside -> empty")
+
+    big = [(0, 0), (30, 0), (30, 30), (0, 30)]
+    tiles = tiling.tile_piece(big, [], 12, 24)
+    check(len(tiles) == 6, "30x30 -> 3x2 = 6 tiles (got %d)" % len(tiles))
+    okfit = True
+    for t in tiles:
+        tx = [p[0] for p in t["outer"]]
+        ty = [p[1] for p in t["outer"]]
+        if (max(tx) - min(tx)) > 12 + 1e-6 or (max(ty) - min(ty)) > 24 + 1e-6:
+            okfit = False
+    check(okfit, "each tile fits within 12x24")
+    check(any(t["cut_edges"] for t in tiles), "interior tiles report cut edges")
+    check(len(tiling.tile_piece(big, [], 12, 24, rotation_deg=90)) >= 1,
+          "rotated grid still tiles")
+
+    # A piece that already fits a tile yields a single tile with no cuts.
+    one = tiling.tile_piece([(0, 0), (5, 0), (5, 5), (0, 5)], [], 12, 24)
+    check(len(one) == 1 and not one[0]["cut_edges"],
+          "piece smaller than a tile -> 1 tile, no cut edges")
+
+
 def _dxf_pairs(text):
     toks = text.split("\n")
     pairs = []
@@ -302,7 +333,7 @@ def main():
               test_circle, test_arc_sweep_flag, test_ellipse_extents,
               test_units_and_empty, test_chain_loop, test_edge_ticks,
               test_fit_rotation, test_svg_fiducials_and_labels,
-              test_rotate_and_centroid, test_dxf):
+              test_rotate_and_centroid, test_dxf, test_tiling):
         t()
     print()
     if _failures:

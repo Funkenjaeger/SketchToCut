@@ -175,8 +175,9 @@ def attr(text, name):
 
 
 def opts(folder, base, unit="mm", bed_w=6.0, bed_h=6.0, bed_w_cm=6.0,
-         bed_h_cm=6.0, fid=True, labels=False):
-    return {"unit": unit, "stroke_width": 0.01, "bed_w": bed_w, "bed_h": bed_h,
+         bed_h_cm=6.0, fid=True, labels=False, fmt="svg"):
+    return {"unit": unit, "stroke_width": 0.01, "fmt": fmt,
+            "bed_w": bed_w, "bed_h": bed_h,
             "bed_w_cm": bed_w_cm, "bed_h_cm": bed_h_cm, "fid_enabled": fid,
             "fid_len_cm": 0.6, "fid_spacing_cm": 5.0, "fid_inset_cm": 0.3,
             "fid_color": "red", "label_on_pieces": labels,
@@ -226,19 +227,42 @@ def scenario_hole():
 
 
 def scenario_fit():
-    print("scenario_fit (auto-rotate + skip oversized):")
-    fit_piece = Profile([Loop(rect_pcs(0, 0, 8, 3), True)])
-    big_piece = Profile([Loop(rect_pcs(20, 0, 70, 50), True)])
+    print("scenario_fit (single 8x3 piece auto-rotated to fit a 4x100 bed):")
+    piece = Profile([Loop(rect_pcs(0, 0, 8, 3), True)])
     d = tempfile.mkdtemp()
-    summary = m.run_per_region_export(
-        Sketch([fit_piece, big_piece]), [fit_piece, big_piece],
+    m.run_per_region_export(
+        Sketch([piece]), [piece],
         opts(d, "fit", unit="cm", bed_w=4, bed_h=100, bed_w_cm=4, bed_h_cm=100,
              fid=False))
-    files = sorted(f for f in os.listdir(d) if not f.endswith("MASTER.svg"))
-    check(len(files) == 1, "one written, one skipped (got %s)" % files)
-    check(attr(read(d, files[0]), "width") == "3cm",
+    files = sorted(os.listdir(d))
+    check(files == ["fit.svg"], "single fitting piece -> fit.svg (got %s)" % files)
+    check(attr(read(d, "fit.svg"), "width") == "3cm",
           "8x3 auto-rotated 90deg -> width 3cm")
-    check("SKIPPED" in summary, "oversized piece reported as skipped")
+
+
+def _dim(text, name):
+    return float(attr(text, name).rstrip("cm"))
+
+
+def scenario_tile():
+    print("scenario_tile (30x30 region tiled into a 12x24 bed):")
+    piece = Profile([Loop(rect_pcs(0, 0, 30, 30), True)])
+    d = tempfile.mkdtemp()
+    summary = m.run_per_region_export(
+        Sketch([piece]), [piece],
+        opts(d, "big", unit="cm", bed_w=12, bed_h=24, bed_w_cm=12, bed_h_cm=24,
+             fid=True))
+    tiles = sorted(f for f in os.listdir(d) if not f.endswith("MASTER.svg"))
+    check(len(tiles) == 6, "30x30 -> ceil(30/12) x ceil(30/24) = 6 tiles (got %d)"
+          % len(tiles))
+    check("auto-tiled" in summary, "summary reports auto-tiling")
+    fits = all(_dim(read(d, f), "width") <= 12 + 1e-6
+               and _dim(read(d, f), "height") <= 24 + 1e-6 for f in tiles)
+    check(fits, "every tile fits within the 12x24 bed")
+    check(any('class="fiducial"' in read(d, f) for f in tiles),
+          "tiles carry cut-edge fiducials")
+    check('class="fiducial"' in read(d, "big_MASTER.svg"),
+          "master shows the tile fiducials")
 
 
 def scenario_trim():
@@ -261,10 +285,28 @@ def scenario_trim():
     check(h == "4cm", "height 4cm (got %s)" % h)
 
 
+def scenario_dxf():
+    print("scenario_dxf (DXF output through tiling + fiducials):")
+    piece = Profile([Loop(rect_pcs(0, 0, 30, 30), True)])
+    d = tempfile.mkdtemp()
+    m.run_per_region_export(
+        Sketch([piece]), [piece],
+        opts(d, "laser", unit="mm", bed_w=120, bed_h=240, bed_w_cm=12,
+             bed_h_cm=24, fid=True, fmt="dxf"))
+    files = sorted(os.listdir(d))
+    check(all(f.endswith(".dxf") for f in files), "all outputs are .dxf: %s" % files)
+    check(any(f == "laser_MASTER.dxf" for f in files), "DXF master emitted")
+    sample = read(d, [f for f in files if f != "laser_MASTER.dxf"][0])
+    check("POLYLINE" in sample and sample.rstrip().endswith("EOF"),
+          "a tile DXF is well-formed (POLYLINE + EOF)")
+
+
 def main():
     scenario_split()
     scenario_hole()
     scenario_fit()
+    scenario_tile()
+    scenario_dxf()
     scenario_trim()
     print()
     if _fail:

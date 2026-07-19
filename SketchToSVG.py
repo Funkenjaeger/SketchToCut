@@ -34,6 +34,30 @@ from .core import dxf as dxfwriter
 from .core import loops as looplib
 from .core import fiducials as fidlib
 from .core import fitting as fitlib
+from .core import tiling as tilelib
+
+
+def _elem_polygon(elem):
+    """A closed polygon (list of points) for an outer/hole element."""
+    if isinstance(elem, geom.Polyline):
+        return list(elem.points)
+    return geom.sample_element_points(elem)  # circle/ellipse -> polygon
+
+
+def _tile_to_piece(tile, opts):
+    """Turn a tiling.tile_piece() dict into an output-piece dict."""
+    outer = geom.Polyline(tile["outer"], closed=True)
+    holes = [geom.Polyline(h, closed=True) for h in tile["holes"]]
+    centroid = geom.polygon_centroid(tile["outer"])
+    fids = []
+    if opts["fid_enabled"]:
+        for a, b in tile["cut_edges"]:
+            seg = [a, b] if a <= b else [b, a]  # canonical -> adjacent tiles match
+            fids.extend(fidlib.edge_ticks(
+                seg, centroid, length=opts["fid_len_cm"],
+                spacing=opts["fid_spacing_cm"], inset=opts["fid_inset_cm"]))
+    return {"outer": outer, "holes": holes, "cloud": list(tile["outer"]),
+            "centroid": centroid, "fiducials": fids, "_theta": 0.0}
 
 
 def _render_doc(elements, unit, fmt, stroke_width, fid_color="red",
@@ -483,14 +507,41 @@ def run_per_region_export(sketch, target_profiles, opts):
     fmt = opts.get("fmt", "svg")
     ext = "dxf" if fmt == "dxf" else "svg"
     wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
+    tile_rot = opts.get("tile_rotation_deg", 0.0)
     folder, base = opts["folder"], opts["base"]
 
-    # A single region needs no letter suffix and no assembly map.
-    single = len(survivors) == 1
-
-    written, skipped = [], []
-    master_elements, master_labels, master_fiducials = [], [], []
+    # Expand oversized regions (fit at no rotation) into bed-sized tiles.
+    final, untileable, n_tiled = [], [], 0
     for p in survivors:
+        theta = fitlib.fit_rotation(p["cloud"], wc, hc, step_deg=FIT_STEP_DEG)
+        if theta is not None:
+            p["_theta"] = theta
+            final.append(p)
+            continue
+        tiles = tilelib.tile_piece(
+            _elem_polygon(p["outer"]), [_elem_polygon(h) for h in p["holes"]],
+            wc, hc, tile_rot)
+        pieces = [_tile_to_piece(t, opts) for t in tiles]
+        pieces = [q for q in pieces if q]
+        if pieces:
+            n_tiled += 1
+            final.extend(pieces)
+        else:
+            untileable.append(p)
+
+    if not final:
+        return ("Nothing to export -- the region(s) could not be fit or tiled "
+                "to the %g x %g %s bed." % (opts["bed_w"], opts["bed_h"], unit))
+
+    # Sort every final piece top->bottom, left->right; assign A, B, C...
+    final.sort(key=lambda q: (-q["centroid"][1], q["centroid"][0]))
+    for i, q in enumerate(final):
+        q["letter"] = _letter(i)
+
+    single = len(final) == 1
+    written = []
+    master_elements, master_labels, master_fiducials = [], [], []
+    for p in final:
         letter = p["letter"]
         lh = _label_height_cm(p["outer"])
         master_elements.append(p["outer"])
@@ -500,10 +551,7 @@ def run_per_region_export(sketch, target_profiles, opts):
         # matching ticks on adjacent pieces line up along their shared cuts.
         master_fiducials.extend(p.get("fiducials", []))
 
-        theta = fitlib.fit_rotation(p["cloud"], wc, hc, step_deg=FIT_STEP_DEG)
-        if theta is None:
-            skipped.append(letter)
-            continue
+        theta = p["_theta"]
         center = p["centroid"]
         outer_r = geom.rotate_element(p["outer"], theta, center)
         holes_r = [geom.rotate_element(h, theta, center) for h in p["holes"]]
@@ -527,22 +575,19 @@ def run_per_region_export(sketch, target_profiles, opts):
             fp.write(master_doc)
 
     if single:
-        if written:
-            lines = ["Exported 1 region to:\n%s" % os.path.join(
-                folder, "%s.%s" % (base, ext))]
-        else:
-            lines = ["The single region does not fit the %g x %g %s bed at any "
-                     "rotation." % (opts["bed_w"], opts["bed_h"], unit)]
+        lines = ["Exported 1 piece to:\n%s" % os.path.join(
+            folder, "%s.%s" % (base, ext))]
     else:
         lines = ["Exported %d piece file(s) + %s_MASTER.%s to:\n%s\n" % (
             len(written), base, ext, folder)]
-        lines.append("Pieces: %s" % (", ".join(written) if written else "(none)"))
-        if skipped:
-            lines.append(
-                "\nSKIPPED (don't fit the %g x %g %s bed at any rotation): %s\n"
-                "Increase the bed size or slice these smaller (auto-tiling is a "
-                "future feature)." % (opts["bed_w"], opts["bed_h"], unit,
-                                      ", ".join(skipped)))
+        lines.append("Pieces: %s" % ", ".join(written))
+    if n_tiled:
+        lines.append("\n%d oversized region(s) were auto-tiled to the "
+                     "%g x %g %s bed." % (n_tiled, opts["bed_w"], opts["bed_h"],
+                                          unit))
+    if untileable:
+        lines.append("\n%d region(s) could not be tiled (degenerate geometry)."
+                     % len(untileable))
     if open_count:
         lines.append("\n%d open curve(s) not part of any region were skipped."
                      % open_count)
