@@ -203,7 +203,11 @@ def scenario_split():
     a = read(d, "split_A.svg")
     check('class="fiducial"' in a, "piece A has a fiducial group (shared edge)")
     check("Z" in attr(a, "d"), "piece A outline is a closed path")
-    check(">A<" in read(d, "split_MASTER.svg"), "master labels A")
+    master = read(d, "split_MASTER.svg")
+    check(">A<" in master, "master labels A")
+    # Master's fiducial group carries both the labels AND the tick paths.
+    fid_group = master.split('class="fiducial"')[1]
+    check("<path" in fid_group, "master fiducial group includes tick paths")
     check("Pieces: A, B" in summary, "summary lists A, B")
 
 

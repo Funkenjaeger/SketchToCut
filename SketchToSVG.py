@@ -386,13 +386,16 @@ def run_per_region_export(sketch, target_profiles, opts):
     single = len(survivors) == 1
 
     written, skipped = [], []
-    master_elements, master_labels = [], []
+    master_elements, master_labels, master_fiducials = [], [], []
     for p in survivors:
         letter = p["letter"]
         lh = _label_height_cm(p["outer"])
         master_elements.append(p["outer"])
         master_elements.extend(p["holes"])
         master_labels.append((letter, p["centroid"], lh))
+        # Fiducials in original (un-rotated) coords so the master shows how the
+        # matching ticks on adjacent pieces line up along their shared cuts.
+        master_fiducials.extend(p.get("fiducials", []))
 
         theta = fitlib.fit_rotation(p["cloud"], wc, hc, step_deg=FIT_STEP_DEG)
         if theta is None:
@@ -417,6 +420,7 @@ def run_per_region_export(sketch, target_profiles, opts):
     if not single:
         master_svg = svgwriter.render(
             master_elements, unit=unit, stroke_width=sw,
+            fiducials=master_fiducials or None,
             fiducial_stroke=opts["fid_color"], labels=master_labels)
         with open(os.path.join(folder, "%s_MASTER.svg" % base),
                   "w", encoding="utf-8") as fp:
