@@ -35,6 +35,7 @@ from .core import loops as looplib
 from .core import fiducials as fidlib
 from .core import fitting as fitlib
 from .core import tiling as tilelib
+from .core import palette as palettelib
 
 
 def _elem_polygon(elem):
@@ -99,6 +100,20 @@ def _render_doc(elements, unit, fmt, stroke_width, fid_color="red",
     return (svgwriter.render(elements, unit=unit, stroke_width=stroke_width,
                              fiducials=fiducials, fiducial_stroke=fid_color,
                              labels=labels), "svg")
+
+
+def _render_groups_doc(groups_spec, unit, fmt, stroke_width, fiducials=None,
+                       labels=None):
+    """Render multi-color/-layer groups to the chosen format; (text, extension)."""
+    if fmt == "dxf":
+        groups = [{"elements": g["elements"], "layer": g["layer"],
+                   "color": g["color"]} for g in groups_spec]
+        return (dxfwriter.render_groups(groups, unit=unit, fiducials=fiducials,
+                                        labels=labels), "dxf")
+    groups = [{"elements": g["elements"], "stroke": g["stroke"]}
+              for g in groups_spec]
+    return (svgwriter.render_groups(groups, unit=unit, stroke_width=stroke_width,
+                                    fiducials=fiducials, labels=labels), "svg")
 
 # --- constants -------------------------------------------------------------
 CMD_ID = "SketchToSVG_ExportCmd"
@@ -511,13 +526,21 @@ def extract_regions(sketch, target_profiles):
     return survivors, key_to_pieces, key_points, open_count
 
 
-def run_per_region_export(sketch, target_profiles, opts):
-    """Fit each region to the bed, write one SVG per piece + a master. Returns a summary."""
+def _build_final_pieces(sketch, target_profiles, opts):
+    """Shared pipeline: regions -> fiducials -> fit/tile -> letter -> drop unfitting.
+
+    Returns ``(final_pieces, info)`` where ``info`` has ``n_tiled``, ``untileable``,
+    ``open_count``, and ``error`` (a user message if nothing to export, else None).
+    Each final piece dict carries ``outer``/``holes``/``fiducials``/``centroid``/
+    ``letter``/``_theta`` (the fit rotation, all in original cm coords).
+    """
     survivors, key_to_pieces, key_points, open_count = extract_regions(
         sketch, target_profiles)
+    info = {"n_tiled": 0, "untileable": [], "open_count": open_count, "error": None}
     if not survivors:
-        return ("No closed regions found to export.\n\nDraw closed profiles "
-                "(and slice them with lines), then run again.")
+        info["error"] = ("No closed regions found to export.\n\nDraw closed "
+                         "profiles (and slice them with lines), then run again.")
+        return [], info
 
     if opts["fid_enabled"]:
         for k, idxs in key_to_pieces.items():
@@ -533,15 +556,10 @@ def run_per_region_export(sketch, target_profiles, opts):
                                       spacing=opts["fid_spacing_cm"],
                                       inset=opts["fid_inset_cm"]))
 
-    unit, sw = opts["unit"], opts["stroke_width"]
-    fmt = opts.get("fmt", "svg")
-    ext = "dxf" if fmt == "dxf" else "svg"
     wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
     tile_rot = opts.get("tile_rotation_deg", 0.0)
     tile_min = opts.get("tile_min_size_cm", 0.0)
-    folder, base = opts["folder"], opts["base"]
 
-    # Expand oversized regions (fit at no rotation) into bed-sized tiles.
     final, untileable, n_tiled = [], [], 0
     for p in survivors:
         theta = fitlib.fit_rotation(p["cloud"], wc, hc, step_deg=FIT_STEP_DEG)
@@ -552,8 +570,7 @@ def run_per_region_export(sketch, target_profiles, opts):
         tiles = tilelib.tile_piece(
             _elem_polygon(p["outer"]), [_elem_polygon(h) for h in p["holes"]],
             wc, hc, tile_rot, tile_min)
-        pieces = [_tile_to_piece(t, opts) for t in tiles]
-        pieces = [q for q in pieces if q]
+        pieces = [q for q in (_tile_to_piece(t, opts) for t in tiles) if q]
         if pieces:
             n_tiled += 1
             final.extend(pieces)
@@ -561,18 +578,49 @@ def run_per_region_export(sketch, target_profiles, opts):
             untileable.append(p)
 
     if not final:
-        return ("Nothing to export -- the region(s) could not be fit or tiled "
-                "to the %g x %g %s bed." % (opts["bed_w"], opts["bed_h"], unit))
+        info["error"] = ("Nothing to export -- the region(s) could not be fit "
+                         "or tiled to the %g x %g %s bed."
+                         % (opts["bed_w"], opts["bed_h"], opts["unit"]))
+        return [], info
 
-    # Sort every final piece top->bottom, left->right; assign A, B, C...
     final.sort(key=lambda q: (-q["centroid"][1], q["centroid"][0]))
     for i, q in enumerate(final):
         q["letter"] = _letter(i)
-
-    # Drop fiducial ticks (both halves) that don't fit inside their piece.
     _drop_unfitting_fiducials(final)
 
+    info["n_tiled"] = n_tiled
+    info["untileable"] = untileable
+    return final, info
+
+
+def _tile_note(info, opts):
+    """Trailing summary lines shared by both export modes."""
+    lines = []
+    if info["n_tiled"]:
+        lines.append("\n%d oversized region(s) were auto-tiled to the "
+                     "%g x %g %s bed." % (info["n_tiled"], opts["bed_w"],
+                                          opts["bed_h"], opts["unit"]))
+    if info["untileable"]:
+        lines.append("\n%d region(s) could not be tiled (degenerate geometry)."
+                     % len(info["untileable"]))
+    if info["open_count"]:
+        lines.append("\n%d open curve(s) not part of any region were skipped."
+                     % info["open_count"])
+    return lines
+
+
+def run_per_region_export(sketch, target_profiles, opts):
+    """One file per piece + a MASTER assembly map. Returns a summary."""
+    final, info = _build_final_pieces(sketch, target_profiles, opts)
+    if info["error"]:
+        return info["error"]
+
+    unit, sw = opts["unit"], opts["stroke_width"]
+    fmt = opts.get("fmt", "svg")
+    ext = "dxf" if fmt == "dxf" else "svg"
+    folder, base = opts["folder"], opts["base"]
     single = len(final) == 1
+
     written = []
     master_elements, master_labels, master_fiducials = [], [], []
     for p in final:
@@ -581,12 +629,9 @@ def run_per_region_export(sketch, target_profiles, opts):
         master_elements.append(p["outer"])
         master_elements.extend(p["holes"])
         master_labels.append((letter, p["centroid"], lh))
-        # Fiducials in original (un-rotated) coords so the master shows how the
-        # matching ticks on adjacent pieces line up along their shared cuts.
         master_fiducials.extend(p.get("fiducials", []))
 
-        theta = p["_theta"]
-        center = p["centroid"]
+        theta, center = p["_theta"], p["centroid"]
         outer_r = geom.rotate_element(p["outer"], theta, center)
         holes_r = [geom.rotate_element(h, theta, center) for h in p["holes"]]
         fids_r = [geom.rotate_element(f, theta, center)
@@ -615,17 +660,65 @@ def run_per_region_export(sketch, target_profiles, opts):
         lines = ["Exported %d piece file(s) + %s_MASTER.%s to:\n%s\n" % (
             len(written), base, ext, folder)]
         lines.append("Pieces: %s" % ", ".join(written))
-    if n_tiled:
-        lines.append("\n%d oversized region(s) were auto-tiled to the "
-                     "%g x %g %s bed." % (n_tiled, opts["bed_w"], opts["bed_h"],
-                                          unit))
-    if untileable:
-        lines.append("\n%d region(s) could not be tiled (degenerate geometry)."
-                     % len(untileable))
-    if open_count:
-        lines.append("\n%d open curve(s) not part of any region were skipped."
-                     % open_count)
-    return "\n".join(lines)
+    return "\n".join(lines + _tile_note(info, opts))
+
+
+def run_one_file_export(sketch, target_profiles, opts):
+    """Pack all pieces into ONE multi-color file, arranged along an axis."""
+    final, info = _build_final_pieces(sketch, target_profiles, opts)
+    if info["error"]:
+        return info["error"]
+
+    unit, sw = opts["unit"], opts["stroke_width"]
+    fmt = opts.get("fmt", "svg")
+    ext = "dxf" if fmt == "dxf" else "svg"
+    axis = opts.get("arrange_axis", "Y")
+    folder, base = opts["folder"], opts["base"]
+    gap = 0.5  # cm between packed pieces
+
+    # Rotate each piece to its fit orientation, then translate into a single
+    # column (Y) or row (X). Fit already guarantees width <= bedW, height <= bedH.
+    groups_spec, all_fids, labels = [], [], []
+    colors = palettelib.distinct_colors(len(final))
+    cursor = 0.0
+    for i, p in enumerate(final):
+        theta, center = p["_theta"], p["centroid"]
+        outer = geom.rotate_element(p["outer"], theta, center)
+        holes = [geom.rotate_element(h, theta, center) for h in p["holes"]]
+        fids = [geom.rotate_element(f, theta, center)
+                for f in p.get("fiducials", [])]
+        minx, miny, maxx, maxy = geom.bounding_box([outer] + holes)
+        w, h = maxx - minx, maxy - miny
+        if axis == "X":
+            dx, dy = cursor - minx, -miny
+            cursor += w + gap
+        else:  # Y
+            dx, dy = -minx, cursor - miny
+            cursor += h + gap
+        outer_t = geom.translate_element(outer, dx, dy)
+        holes_t = [geom.translate_element(x, dx, dy) for x in holes]
+        all_fids.extend(geom.translate_element(x, dx, dy) for x in fids)
+        groups_spec.append({
+            "elements": [outer_t] + holes_t, "stroke": colors[i],
+            "layer": "PIECE_%s" % p["letter"], "color": palettelib.aci_color(i)})
+        if opts["label_on_pieces"]:
+            lh = _label_height_cm(outer_t)
+            labels.append((p["letter"], (center[0] + dx, center[1] + dy), lh))
+
+    doc, ext = _render_groups_doc(groups_spec, unit, fmt, sw,
+                                  all_fids or None, labels or None)
+    path = os.path.join(folder, "%s.%s" % (base, ext))
+    with open(path, "w", encoding="utf-8") as fp:
+        fp.write(doc)
+
+    all_elems = [e for gspec in groups_spec for e in gspec["elements"]]
+    bb = geom.bounding_box(all_elems)
+    scl = geom.cm_to(unit)
+    lines = ["Exported %d piece(s) into one %s file (arranged along %s):\n%s\n"
+             % (len(final), ext.upper(), axis, path)]
+    lines.append("Overall size: %.2f x %.2f %s (must fit your material area)."
+                 % ((bb[2] - bb[0]) * scl, (bb[3] - bb[1]) * scl, unit))
+    return "\n".join(lines + _tile_note(info, opts))
 
 
 # --- command handlers ------------------------------------------------------
@@ -637,51 +730,14 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             stroke_width = inputs.itemById("strokeWidth").value
             fmt = "dxf" if inputs.itemById("outputFormat").selectedItem.index == 1 \
                 else "svg"
-            if inputs.itemById("exportMode").selectedItem.index == 0:
-                self._export_whole(inputs, unit, stroke_width, fmt)
-            else:
-                self._export_regions(inputs, unit, stroke_width, fmt)
+            one_file = inputs.itemById("exportMode").selectedItem.index == 0
+            self._export(inputs, unit, stroke_width, fmt, one_file)
             _save_settings(_capture_settings(inputs))
         except:  # noqa: E722 -- surface any failure to the user
             if _ui:
                 _ui.messageBox("Export failed:\n{}".format(traceback.format_exc()))
 
-    def _export_whole(self, inputs, unit, stroke_width, fmt):
-        include_construction = inputs.itemById("includeConstruction").value
-        sketch = _resolve_sketch()
-        if not sketch:
-            _ui.messageBox(
-                "No sketch found.\n\nOpen a sketch for edit (double-click it), "
-                "or select one in the browser tree, then run again.")
-            return
-        elements = extract_elements(sketch, include_construction)
-        if not elements:
-            _ui.messageBox("That sketch has no exportable profile curves "
-                           "(construction/reference geometry is skipped).")
-            return
-        doc, ext = _render_doc(elements, unit, fmt, stroke_width)
-
-        dlg = _ui.createFileDialog()
-        dlg.title = "Save " + ext.upper()
-        dlg.filter = "%s files (*.%s)" % (ext.upper(), ext)
-        safe = "".join(c for c in sketch.name
-                       if c.isalnum() or c in " _-").strip() or "sketch"
-        dlg.initialFilename = "%s.%s" % (safe, ext)
-        if dlg.showSave() != adsk.core.DialogResults.DialogOK:
-            return
-        path = dlg.filename
-        if not path.lower().endswith("." + ext):
-            path += "." + ext
-        with open(path, "w", encoding="utf-8") as fp:
-            fp.write(doc)
-
-        bbox = geom.bounding_box(elements)
-        s = geom.cm_to(unit)
-        _ui.messageBox("Exported %d curve(s).\nSize: %.3f x %.3f %s (1:1)\n\n%s" % (
-            len(elements), (bbox[2] - bbox[0]) * s, (bbox[3] - bbox[1]) * s,
-            unit, path))
-
-    def _export_regions(self, inputs, unit, stroke_width, fmt):
+    def _export(self, inputs, unit, stroke_width, fmt, one_file):
         # Targets: profiles picked in the Regions input, else all of the sketch.
         profs = []
         sel_in = inputs.itemById("regions")
@@ -708,12 +764,11 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 return
 
         s = geom.cm_to(unit)
-        bed_w = inputs.itemById("bedW").value
-        bed_h = inputs.itemById("bedH").value
         ext = "dxf" if fmt == "dxf" else "svg"
 
         dlg = _ui.createFileDialog()
-        dlg.title = "Choose output folder + base name (per-piece files are added)"
+        dlg.title = ("Save one-file output" if one_file
+                     else "Choose output folder + base name (per-piece files added)")
         dlg.filter = "%s files (*.%s)" % (ext.upper(), ext)
         safe = "".join(c for c in sketch.name
                        if c.isalnum() or c in " _-").strip() or "sketch"
@@ -726,8 +781,10 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
 
         opts = {
             "unit": unit, "stroke_width": stroke_width, "fmt": fmt,
-            "bed_w": bed_w, "bed_h": bed_h,
-            "bed_w_cm": bed_w / s, "bed_h_cm": bed_h / s,
+            "bed_w": inputs.itemById("bedW").value,
+            "bed_h": inputs.itemById("bedH").value,
+            "bed_w_cm": inputs.itemById("bedW").value / s,
+            "bed_h_cm": inputs.itemById("bedH").value / s,
             "fid_enabled": inputs.itemById("fidEnabled").value,
             "fid_len_cm": inputs.itemById("fidLen").value / 10.0,   # mm -> cm
             "fid_spacing_cm": inputs.itemById("fidSpacing").value / 10.0,
@@ -736,9 +793,14 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             "label_on_pieces": inputs.itemById("labelPieces").value,
             "tile_rotation_deg": inputs.itemById("tileRotation").value,
             "tile_min_size_cm": inputs.itemById("tileMinSize").value / s,
+            "arrange_axis": ("X" if inputs.itemById("arrangeAxis").selectedItem.index == 1
+                             else "Y"),
             "folder": folder, "base": base,
         }
-        _ui.messageBox(run_per_region_export(sketch, targets, opts))
+        if one_file:
+            _ui.messageBox(run_one_file_export(sketch, targets, opts))
+        else:
+            _ui.messageBox(run_per_region_export(sketch, targets, opts))
 
 
 class CreatedHandler(adsk.core.CommandCreatedEventHandler):
@@ -749,8 +811,8 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
 
             mode = inputs.addDropDownCommandInput("exportMode", "Export mode",
                                                   text_list)
-            mode.listItems.add("Whole sketch (single SVG)", True)   # index 0
-            mode.listItems.add("One file per region", False)        # index 1
+            mode.listItems.add("One file (all pieces, multi-color)", True)  # idx 0
+            mode.listItems.add("One file per region", False)               # idx 1
 
             # Explicit region picker (per-region mode). Captured here in the
             # command so it survives the dialog opening -- Fusion clears the
@@ -781,16 +843,16 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             units.listItems.add("Inch", True)      # index 0, default
             units.listItems.add("Millimeter", False)
 
-            inputs.addBoolValueInput(
-                "includeConstruction",
-                "Include construction geometry (whole-sketch mode)",
-                True, "", False)
+            arrange = inputs.addDropDownCommandInput(
+                "arrangeAxis", "Arrange along (one-file mode)", text_list)
+            arrange.listItems.add("Y (stack down a column)", True)   # index 0
+            arrange.listItems.add("X (stack across a row)", False)   # index 1
 
             inputs.addFloatSpinnerCommandInput(
                 "strokeWidth", "Stroke width (output units)",
                 "", 0.0, 10.0, 0.005, 0.01)
 
-            grp = inputs.addGroupCommandInput("perRegion", "Per-region options")
+            grp = inputs.addGroupCommandInput("perRegion", "Bed / fiducials / tiling")
             grp.isExpanded = True
             gi = grp.children
             gi.addFloatSpinnerCommandInput(
@@ -812,10 +874,12 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
 
             inputs.addTextBoxCommandInput(
                 "hint", "",
-                "Whole-sketch: one 1:1 file. Per-region: one file per closed "
-                "region (selected, else all), auto-rotated to fit the bed; "
-                "regions too big to fit are tiled. Plus a MASTER assembly map. "
-                "SVG for the vinyl cutter, DXF for laser/SendCutSend.", 4, True)
+                "Both modes: each closed region (selected, else all) is "
+                "auto-rotated to fit the bed; too-big regions are tiled. "
+                "One file = all pieces in one multi-color file, packed along the "
+                "chosen axis (peel each color onto its own vinyl sheet). "
+                "Per region = one file per piece + a MASTER assembly map. "
+                "SVG for the vinyl cutter, DXF for laser/SendCutSend.", 5, True)
 
             # Restore last-used values (overrides the hard-coded defaults above).
             _apply_settings(inputs)

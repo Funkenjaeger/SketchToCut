@@ -20,6 +20,7 @@ from core import loops
 from core import fiducials
 from core import fitting
 from core import tiling
+from core import palette
 
 
 _failures = []
@@ -295,6 +296,32 @@ def test_tiling():
           "shorter than a tile: single span")
 
 
+def test_one_file_core():
+    print("test_one_file_core (translate, palette, render_groups):")
+    t = g.translate_element(g.Line((0, 0), (1, 1)), 5, 3)
+    check(t.p0 == (5, 3) and t.p1 == (6, 4), "translate_element shifts a line")
+    check(g.translate_element(g.Circle((1, 1), 2), 3, 0).center == (4, 1),
+          "translate_element shifts a circle center")
+
+    cols = palette.distinct_colors(5)
+    check(len(cols) == 5 and len(set(cols)) == 5, "5 distinct palette colors")
+    check(all(c.startswith("#") and len(c) == 7 for c in cols), "hex #RRGGBB")
+    check(palette.distinct_colors(0) == [], "0 colors -> empty")
+
+    groups = [
+        {"elements": [g.Polyline([(0, 0), (1, 0), (1, 1), (0, 1)], closed=True)],
+         "stroke": "#FF0000"},
+        {"elements": [g.Polyline([(2, 0), (3, 0), (3, 1), (2, 1)], closed=True)],
+         "stroke": "#00FF00"},
+    ]
+    out = svg.render_groups(groups, unit="mm")
+    check(out.count("<g ") == 2, "render_groups emits one group per piece")
+    check("#FF0000" in out and "#00FF00" in out, "both piece colors present")
+    # Two side-by-side unit squares span 3cm -> 30mm wide, 1cm -> 10mm tall.
+    check(attr(out, "viewBox") == "0 0 30 10",
+          "render_groups uses one shared bbox (30x10 mm)")
+
+
 def _dxf_pairs(text):
     toks = text.split("\n")
     pairs = []
@@ -348,7 +375,8 @@ def main():
               test_circle, test_arc_sweep_flag, test_ellipse_extents,
               test_units_and_empty, test_chain_loop, test_edge_ticks,
               test_fit_rotation, test_svg_fiducials_and_labels,
-              test_rotate_and_centroid, test_dxf, test_tiling):
+              test_rotate_and_centroid, test_dxf, test_tiling,
+              test_one_file_core):
         t()
     print()
     if _failures:

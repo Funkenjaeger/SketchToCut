@@ -231,6 +231,23 @@ def rotate_element(e, theta: float, center: Point = (0.0, 0.0)):
     raise TypeError("Cannot rotate element type: %r" % (type(e),))
 
 
+def translate_element(e, dx: float, dy: float):
+    """Return a copy of an IR element translated by ``(dx, dy)``."""
+    if isinstance(e, Line):
+        return Line((e.p0[0] + dx, e.p0[1] + dy), (e.p1[0] + dx, e.p1[1] + dy))
+    if isinstance(e, Polyline):
+        return Polyline([(x + dx, y + dy) for x, y in e.points], e.closed)
+    if isinstance(e, Circle):
+        return Circle((e.center[0] + dx, e.center[1] + dy), e.radius)
+    if isinstance(e, Ellipse):
+        return Ellipse((e.center[0] + dx, e.center[1] + dy), e.r_major,
+                       e.r_minor, e.rotation)
+    if isinstance(e, Arc):
+        return Arc((e.center[0] + dx, e.center[1] + dy), e.radius,
+                   e.start_angle, e.end_angle, e.ccw)
+    raise TypeError("Cannot translate element type: %r" % (type(e),))
+
+
 def sample_element_points(e, n: int = 48) -> List[Point]:
     """A point cloud approximating an element, for hull / bbox-under-rotation."""
     if isinstance(e, Line):

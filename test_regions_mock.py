@@ -329,6 +329,28 @@ def scenario_minsize():
           "with min-size 3, no tile narrower than 3cm (min width %.2f)" % min(w1))
 
 
+def scenario_one_file():
+    print("scenario_one_file (all pieces packed into one multi-color file):")
+    ps = [Profile([Loop(rect_pcs(0, 0, 5, 4), True)]),
+          Profile([Loop(rect_pcs(8, 0, 13, 4), True)]),
+          Profile([Loop(rect_pcs(0, 6, 5, 10), True)]),
+          Profile([Loop(rect_pcs(8, 6, 13, 10), True)])]
+    d = tempfile.mkdtemp()
+    m.run_one_file_export(Sketch(ps), ps,
+                          opts(d, "onefile", unit="cm", bed_w=12, bed_h=24,
+                               bed_w_cm=12, bed_h_cm=24, fid=False))
+    files = os.listdir(d)
+    check(files == ["onefile.svg"], "single combined file (got %s)" % files)
+    out = read(d, "onefile.svg")
+    strokes = set(re.findall(r'<g fill="none" stroke="(#[0-9A-Fa-f]{6})"', out))
+    check(len(strokes) == 4, "4 distinct piece colors (got %d)" % len(strokes))
+    w = _dim(out, "width")
+    check(w <= 12 + 1e-6, "Y-arrange: canvas width <= bedW 12cm (got %.2f)" % w)
+    # Stacked (not piled): total height ~ sum of 4x4 heights + 3 gaps of 0.5.
+    h = _dim(out, "height")
+    check(abs(h - (4 * 4 + 3 * 0.5)) < 1e-6, "pieces stacked, not overlapping")
+
+
 def scenario_dxf():
     print("scenario_dxf (DXF output through tiling + fiducials):")
     piece = Profile([Loop(rect_pcs(0, 0, 30, 30), True)])
@@ -352,6 +374,7 @@ def main():
     scenario_tile()
     scenario_minsize()
     scenario_fiducial_drop()
+    scenario_one_file()
     scenario_dxf()
     scenario_trim()
     print()

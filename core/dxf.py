@@ -33,17 +33,21 @@ def _num(v, decimals):
     return ("%.*f" % (decimals, v))
 
 
-def render(elements, unit="in", fiducials=None, labels=None, margin=0.0,
-           decimals=6):
-    """Return a DXF (R2000) document string for ``elements`` (cm-space geometry).
+def render_groups(groups, unit="in", fiducials=None, labels=None, margin=0.0,
+                  decimals=6):
+    """Render multiple layer-groups into one DXF (shared coordinate frame).
 
-    ``fiducials`` (IR elements) and ``labels`` (``(text, (x_cm, y_cm),
-    height_cm)``) are emitted on separate layers.
+    ``groups`` is a list of ``{"elements": [...], "layer": str, "color": aci}``
+    -- each piece goes on its own layer/color so a laser SW can separate them.
+    ``fiducials`` and ``labels`` go on the FIDUCIAL / LABEL layers.
     """
     fiducials = fiducials or []
     labels = labels or []
 
-    bbox = g.bounding_box(list(elements) + list(fiducials))
+    all_elems = []
+    for grp in groups:
+        all_elems.extend(grp.get("elements", []))
+    bbox = g.bounding_box(all_elems + list(fiducials))
     if bbox is None:
         raise ValueError("No geometry to export.")
     minx, miny, maxx, maxy = bbox
@@ -69,6 +73,16 @@ def render(elements, unit="in", fiducials=None, labels=None, margin=0.0,
     def emit(code, value):
         out.append(_pair(code, value))
 
+    seen = set()
+    layers = []
+    for name, color in ([("0", 7), ("FIDUCIAL", 1), ("LABEL", 1)]
+                        + [(grp.get("layer", "0"), grp.get("color", 7))
+                           for grp in groups]):
+        if name in seen:
+            continue
+        seen.add(name)
+        layers.append((name, color))
+
     # ---- HEADER ----
     emit(0, "SECTION"); emit(2, "HEADER")
     emit(9, "$ACADVER"); emit(1, "AC1009")
@@ -84,8 +98,8 @@ def render(elements, unit="in", fiducials=None, labels=None, margin=0.0,
     emit(0, "LTYPE"); emit(2, "CONTINUOUS"); emit(70, 0)
     emit(3, "Solid line"); emit(72, 65); emit(73, 0); emit(40, n(0.0))
     emit(0, "ENDTAB")
-    emit(0, "TABLE"); emit(2, "LAYER"); emit(70, 3)
-    for name, color in (("0", 7), ("FIDUCIAL", 1), ("LABEL", 1)):
+    emit(0, "TABLE"); emit(2, "LAYER"); emit(70, len(layers))
+    for name, color in layers:
         emit(0, "LAYER"); emit(2, name); emit(70, 0)
         emit(62, color); emit(6, "CONTINUOUS")
     emit(0, "ENDTAB")
@@ -93,8 +107,10 @@ def render(elements, unit="in", fiducials=None, labels=None, margin=0.0,
 
     # ---- ENTITIES ----
     emit(0, "SECTION"); emit(2, "ENTITIES")
-    for e in elements:
-        _emit_element(e, emit, X, Y, n, s, "0")
+    for grp in groups:
+        layer = grp.get("layer", "0")
+        for e in grp.get("elements", []):
+            _emit_element(e, emit, X, Y, n, s, layer)
     for e in fiducials:
         _emit_element(e, emit, X, Y, n, s, "FIDUCIAL")
     for text, (lx, ly), height_cm in labels:
@@ -103,6 +119,15 @@ def render(elements, unit="in", fiducials=None, labels=None, margin=0.0,
 
     emit(0, "EOF")
     return "\n".join(out) + "\n"
+
+
+def render(elements, unit="in", fiducials=None, labels=None, margin=0.0,
+           decimals=6):
+    """Single-layer DXF (cut geometry on layer 0). Delegates to
+    :func:`render_groups`."""
+    return render_groups([{"elements": elements, "layer": "0", "color": 7}],
+                         unit=unit, fiducials=fiducials, labels=labels,
+                         margin=margin, decimals=decimals)
 
 
 def _polyline(emit, pts, closed, n, layer):
