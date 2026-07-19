@@ -17,5 +17,8 @@ Thumbs.db
 *.svg
 *.dxf
 
+# ...but do track the example images used in the README
+!docs/*.svg
+
 # Per-user remembered dialog settings
 settings.json

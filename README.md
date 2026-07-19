@@ -17,8 +17,11 @@ quoting is otherwise fiddly. This makes it one click.
     color** (peel each onto its own vinyl sheet), stacked along a chosen axis
     (Y default) within the bed width.
   * **One file per region** — one file per closed sketch region (Fusion
-    profile) + a `MASTER` assembly map, so you can manually section a part by
-    drawing dividing lines.
+    profile), so you can manually section a part by drawing dividing lines.
+* Both modes emit an **`ASSEMBLY`** reference (filled, colored, lettered) showing
+  where every piece belongs. Shapes are **filled** (holes cut via even-odd), each
+  piece a distinct color, with fiducials in the same color so they cut together;
+  red is reserved for the piece letters.
 * **SVG** (vinyl) or **DXF** (R12, laser/SendCutSend) output.
 * Holes preserved; a bolt-hole disc is not emitted as a spurious piece.
 * Each piece **auto-rotated** to fit a user **max bed size**; regions too big to
@@ -27,6 +30,23 @@ quoting is otherwise fiddly. This makes it one click.
 * **Alignment fiducials** (perpendicular ticks) on shared cut edges; ticks that
   would poke out of a thin piece are dropped (both halves).
 * Dialog settings are **remembered** between runs.
+
+## Example
+
+A large panel exported in **One file** mode. It's bigger than the cutter bed, so
+it's **auto-tiled** into six bed-sized pieces (A–F), each a distinct color with
+matching **fiducial** ticks along the shared cuts, and packed into a single
+~12-inch-wide column for the vinyl cutter to separate by color. The **ASSEMBLY**
+reference shows how the pieces fit back into the whole panel.
+
+**ASSEMBLY reference** — how the six pieces reassemble (true size ≈ 80 × 17.5 in):
+
+<img src="docs/example-assembly.svg" width="760" alt="Assembly reference: six colored pieces A-F forming the full panel in their original positions">
+
+**One-file cut layout** — the same pieces auto-tiled and stacked in a
+color-separated column (shown scaled down; true size ≈ 12 × 89 in):
+
+<img src="docs/example-onefile.svg" height="380" alt="One-file output: six colored tiles stacked in a 12-inch column with fiducial ticks and red letters">
 
 ## Install
 
