@@ -12,15 +12,20 @@ quoting is otherwise fiddly. This makes it one click.
 
 ## Features
 
-* **Whole-sketch** export → one 1:1 file, or **per-region** export → one file
-  per closed sketch region (Fusion profile), so you can manually section a part
-  by drawing dividing lines.
+* Two export modes over the same pipeline:
+  * **One file** — every piece packed into a single file, each a **distinct
+    color** (peel each onto its own vinyl sheet), stacked along a chosen axis
+    (Y default) within the bed width.
+  * **One file per region** — one file per closed sketch region (Fusion
+    profile) + a `MASTER` assembly map, so you can manually section a part by
+    drawing dividing lines.
 * **SVG** (vinyl) or **DXF** (R12, laser/SendCutSend) output.
 * Holes preserved; a bolt-hole disc is not emitted as a spurious piece.
-* Each piece **auto-rotated** to fit a user **max bed size**; regions too big
-  to fit at any rotation are **auto-tiled** into bed-sized tiles.
-* **Alignment fiducials** (perpendicular ticks) on shared cut edges + a
-  `MASTER` assembly map showing every piece in its original position.
+* Each piece **auto-rotated** to fit a user **max bed size**; regions too big to
+  fit at any rotation are **auto-tiled** into bed-sized tiles, with a **min tile
+  size** that biases toward full-bed tiles and avoids thin slivers.
+* **Alignment fiducials** (perpendicular ticks) on shared cut edges; ticks that
+  would poke out of a thin piece are dropped (both halves).
 * Dialog settings are **remembered** between runs.
 
 ## Install
@@ -90,3 +95,5 @@ cut it, and measure to confirm true 1:1.
   loops.
 * Fiducials are not matched across a tiled region's outer boundary with an
   adjacent (non-tiled) region.
+* One-file packing is a single column/row (no 2-D wrap); very many pieces make a
+  long strip — set a long-enough material length in your cutter SW.
