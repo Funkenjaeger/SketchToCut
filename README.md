@@ -1,14 +1,27 @@
 # SketchToSVG
 
-A Fusion 360 add-in that exports the active sketch's profile curves to a
-**1:1-scale SVG**, for cutting paper masks on a vinyl cutter (e.g. to trace or
-cut plywood).
+A Fusion 360 add-in that exports a sketch to **1:1-scale SVG or DXF** — for
+cutting paper masks on a vinyl cutter (trace/cut plywood) or sending DXFs to a
+laser cutter / SendCutSend.
 
 ## Why
 
-Vinyl-cutter software often only ingests image formats, but usually accepts
-SVG. Getting a correctly-scaled vector outline out of Fusion for cutting is
-otherwise fiddly. This makes it one click.
+Vinyl-cutter software often only ingests image formats (but accepts SVG), and
+getting a correctly-scaled vector outline out of Fusion for cutting or laser
+quoting is otherwise fiddly. This makes it one click.
+
+## Features
+
+* **Whole-sketch** export → one 1:1 file, or **per-region** export → one file
+  per closed sketch region (Fusion profile), so you can manually section a part
+  by drawing dividing lines.
+* **SVG** (vinyl) or **DXF** (R12, laser/SendCutSend) output.
+* Holes preserved; a bolt-hole disc is not emitted as a spurious piece.
+* Each piece **auto-rotated** to fit a user **max bed size**; regions too big
+  to fit at any rotation are **auto-tiled** into bed-sized tiles.
+* **Alignment fiducials** (perpendicular ticks) on shared cut edges + a
+  `MASTER` assembly map showing every piece in its original position.
+* Dialog settings are **remembered** between runs.
 
 ## Install
 
@@ -34,16 +47,18 @@ geometry are skipped (construction can be re-enabled in the dialog).
 
 ## Design
 
-* **`core/`** — dependency-free geometry IR (`geometry.py`) and the SVG writer
-  (`svg.py`). Handles unit scaling, the sketch→SVG Y-flip, and bounding-box
-  translation. Imports nothing outside the stdlib, so it runs both inside
-  Fusion's sandboxed interpreter and under a plain `python` for testing.
-* **`SketchToSVG.py`** — the add-in: command UI, sketch resolution, and
-  geometry extraction via the Fusion API into the core IR (in centimetres,
-  the API's native unit).
+* **`core/`** — dependency-free (stdlib-only, so it runs inside Fusion's
+  sandboxed interpreter *and* under a plain `python` for testing):
+  `geometry.py` (IR + transforms), `svg.py` / `dxf.py` (writers), `loops.py`
+  (chain profile edges into closed rings), `fiducials.py` (tick marks),
+  `fitting.py` (fit-under-rotation), `tiling.py` (rectangle clip + grid).
+* **`SketchToSVG.py`** — the add-in: command UI, sketch/profile resolution,
+  geometry extraction via the Fusion API into the core IR (in centimetres, the
+  API's native unit), and settings persistence.
 
-Arcs / ellipses / splines are flattened to polylines through the curve
-evaluator (robust, and cutters flatten internally anyway); lines and full
+Per-region extraction uses `ProfileCurve.geometry` (the *trimmed* curve that
+bounds a profile), so a region bordered by part of a long shared curve gets
+only that part. Arcs/ellipses/splines flatten to polylines; lines and full
 circles stay crisp.
 
 ## Test
@@ -54,16 +69,24 @@ The core is unit-tested without Fusion:
 python test_core.py
 ```
 
-Covers 1:1 scaling, unit conversion, the Y-flip, bbox/translate, and the arc
-sweep-flag convention.
+Covers scaling, units, Y-flip, bbox, arc flags, loop chaining, fiducials,
+fit-rotation, tiling, and DXF structure. `test_regions_mock.py` drives the real
+per-region/tiling/DXF export code against a mocked Fusion API. Neither test
+needs Fusion or any third-party package (DXF output is separately validated
+against `ezdxf` as a dev-only check).
 
 ## Scale calibration
 
-SVG unit interpretation varies between tools (1 user-unit = 1 physical unit
-here, vs. some tools assuming 96 units/inch). Before trusting cuts, export a
-known square (e.g. 100 mm), cut it, and measure to confirm true 1:1.
+Unit interpretation varies between tools (1 user-unit = 1 physical unit here,
+vs. some assuming 96 units/inch; DXF sets `$INSUNITS` and SendCutSend confirms
+units on upload). Before trusting cuts, export a known square (e.g. 100 mm),
+cut it, and measure to confirm true 1:1.
 
-## Roadmap
+## Roadmap / limitations
 
-* Auto-tiling: split geometry larger than the cutter bed (e.g. 12×24 in) into
-  multiple SVG tiles with overlap + registration marks for reassembly.
+* Tiling is butt-joint only (no configurable overlap yet).
+* Sutherland-Hodgman clipping connects a concave piece's disjoint
+  tile-intersections with a seam along the tile boundary instead of separate
+  loops.
+* Fiducials are not matched across a tiled region's outer boundary with an
+  adjacent (non-tiled) region.
