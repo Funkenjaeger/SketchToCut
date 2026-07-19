@@ -279,6 +279,18 @@ def test_tiling():
     check(len(one) == 1 and not one[0]["cut_edges"],
           "piece smaller than a tile -> 1 tile, no cut edges")
 
+    # Sliver-aware partition.
+    check(tiling._partition(0, 13, 12, 3) == [0, 10, 13],
+          "sub-min remainder shifts: [0,10,13]")
+    check(tiling._partition(0, 13, 12, 0) == [0, 12, 13],
+          "min=0 keeps fixed grid remainder: [0,12,13]")
+    check(tiling._partition(0, 24, 12, 3) == [0, 12, 24],
+          "exact multiple: [0,12,24]")
+    check(tiling._partition(0, 23, 12, 3) == [0, 12, 23],
+          "big remainder kept: [0,12,23]")
+    check(tiling._partition(0, 5, 12, 3) == [0, 5],
+          "shorter than a tile: single span")
+
 
 def _dxf_pairs(text):
     toks = text.split("\n")

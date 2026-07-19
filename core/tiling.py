@@ -66,7 +66,34 @@ def _rot(pts, ang):
     return [(x * c - y * s, x * s + y * c) for x, y in pts]
 
 
-def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0):
+def _partition(lo, hi, tile, min_size):
+    """Cut boundaries ``[lo, ..., hi]`` along one axis.
+
+    Greedy full-size tiles (use most of the bed); only deviate to avoid a
+    remainder strip below ``min_size``. When the leftover would be a sub-min
+    sliver, the last cut shifts so that strip == ``min_size`` and its neighbor
+    stays as large as possible. ``min_size == 0`` -> plain fixed grid with a
+    (possibly tiny) remainder as the last tile.
+    """
+    length = hi - lo
+    if length <= tile + _TOL:
+        return [lo, hi]
+    min_size = min(min_size, tile)
+    n_full = int(math.floor(length / tile + _TOL))
+    r = length - n_full * tile
+    bounds = [lo + i * tile for i in range(n_full + 1)]  # lo .. lo + n_full*tile
+    if r <= _TOL:
+        return bounds                       # exact multiple of the tile
+    if r >= min_size:
+        bounds.append(hi)                   # remainder tile is big enough
+        return bounds
+    # Sub-min remainder: pin the last strip to min_size, shrink its neighbor.
+    bounds[-1] = hi - min_size
+    bounds.append(hi)
+    return bounds
+
+
+def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0, min_size=0.0):
     """Split a piece into bed-sized tiles.
 
     ``outer`` is the piece's closed outer polygon (cm); ``holes`` a list of
@@ -85,16 +112,16 @@ def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0):
     ys = [p[1] for p in o]
     minx, maxx = min(xs), max(xs)
     miny, maxy = min(ys), max(ys)
-    ncols = max(1, int(math.ceil((maxx - minx - _TOL) / tile_w)))
-    nrows = max(1, int(math.ceil((maxy - miny - _TOL) / tile_h)))
+    xb = _partition(minx, maxx, tile_w, min_size)
+    yb = _partition(miny, maxy, tile_h, min_size)
+    ncols = len(xb) - 1
+    nrows = len(yb) - 1
 
     tiles = []
     for j in range(nrows):
-        ry0 = miny + j * tile_h
-        ry1 = ry0 + tile_h
+        ry0, ry1 = yb[j], yb[j + 1]
         for i in range(ncols):
-            rx0 = minx + i * tile_w
-            rx1 = rx0 + tile_w
+            rx0, rx1 = xb[i], xb[i + 1]
             co = clip_polygon_rect(o, rx0, ry0, rx1, ry1)
             if len(co) < 3:
                 continue

@@ -508,6 +508,7 @@ def run_per_region_export(sketch, target_profiles, opts):
     ext = "dxf" if fmt == "dxf" else "svg"
     wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
     tile_rot = opts.get("tile_rotation_deg", 0.0)
+    tile_min = opts.get("tile_min_size_cm", 0.0)
     folder, base = opts["folder"], opts["base"]
 
     # Expand oversized regions (fit at no rotation) into bed-sized tiles.
@@ -520,7 +521,7 @@ def run_per_region_export(sketch, target_profiles, opts):
             continue
         tiles = tilelib.tile_piece(
             _elem_polygon(p["outer"]), [_elem_polygon(h) for h in p["holes"]],
-            wc, hc, tile_rot)
+            wc, hc, tile_rot, tile_min)
         pieces = [_tile_to_piece(t, opts) for t in tiles]
         pieces = [q for q in pieces if q]
         if pieces:
@@ -701,6 +702,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             "fid_color": "red",
             "label_on_pieces": inputs.itemById("labelPieces").value,
             "tile_rotation_deg": inputs.itemById("tileRotation").value,
+            "tile_min_size_cm": inputs.itemById("tileMinSize").value / s,
             "folder": folder, "base": base,
         }
         _ui.messageBox(run_per_region_export(sketch, targets, opts))
@@ -771,6 +773,9 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                                  True, "", False)
             gi.addFloatSpinnerCommandInput(
                 "tileRotation", "Tile grid rotation (deg)", "", 0.0, 90.0, 1.0, 0.0)
+            gi.addFloatSpinnerCommandInput(
+                "tileMinSize", "Min tile size (output units, 0=off)",
+                "", 0.0, 10000.0, 0.5, 0.0)
 
             inputs.addTextBoxCommandInput(
                 "hint", "",

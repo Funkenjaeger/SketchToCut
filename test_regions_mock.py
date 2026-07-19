@@ -285,6 +285,32 @@ def scenario_trim():
     check(h == "4cm", "height 4cm (got %s)" % h)
 
 
+def scenario_minsize():
+    print("scenario_minsize (min tile size prevents grid slivers):")
+    # 13x30 region, bed 12x24: doesn't fit -> tiles. Without min, the X axis
+    # leaves a 1cm sliver column; with min=3 the last cut shifts to 3cm.
+    piece = Profile([Loop(rect_pcs(0, 0, 13, 30), True)])
+
+    d0 = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([piece]), [piece],
+                            opts(d0, "nomin", unit="cm", bed_w=12, bed_h=24,
+                                 bed_w_cm=12, bed_h_cm=24, fid=False))
+    w0 = [_dim(read(d0, f), "width") for f in os.listdir(d0)
+          if not f.endswith("MASTER.svg")]
+    check(min(w0) < 2, "without min-size a <2cm sliver appears (min width %.2f)"
+          % min(w0))
+
+    d1 = tempfile.mkdtemp()
+    o1 = opts(d1, "wmin", unit="cm", bed_w=12, bed_h=24, bed_w_cm=12,
+              bed_h_cm=24, fid=False)
+    o1["tile_min_size_cm"] = 3.0
+    m.run_per_region_export(Sketch([piece]), [piece], o1)
+    w1 = [_dim(read(d1, f), "width") for f in os.listdir(d1)
+          if not f.endswith("MASTER.svg")]
+    check(min(w1) >= 3 - 1e-6,
+          "with min-size 3, no tile narrower than 3cm (min width %.2f)" % min(w1))
+
+
 def scenario_dxf():
     print("scenario_dxf (DXF output through tiling + fiducials):")
     piece = Profile([Loop(rect_pcs(0, 0, 30, 30), True)])
@@ -306,6 +332,7 @@ def main():
     scenario_hole()
     scenario_fit()
     scenario_tile()
+    scenario_minsize()
     scenario_dxf()
     scenario_trim()
     print()
