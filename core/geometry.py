@@ -157,3 +157,91 @@ def bounding_box(elements: Sequence[object]):
         return None
     return (min(b[0] for b in boxes), min(b[1] for b in boxes),
             max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+# --- polygon helpers (used by per-region export) ---------------------------
+def signed_area(points: Sequence[Point]) -> float:
+    """Shoelace signed area of a closed polygon; +ve for CCW winding."""
+    n = len(points)
+    a = 0.0
+    for i in range(n):
+        x0, y0 = points[i]
+        x1, y1 = points[(i + 1) % n]
+        a += x0 * y1 - x1 * y0
+    return a / 2.0
+
+
+def polygon_centroid(points: Sequence[Point]) -> Point:
+    """Area centroid of a closed polygon (falls back to vertex mean if degenerate)."""
+    n = len(points)
+    if n == 0:
+        raise ValueError("no points")
+    a = signed_area(points)
+    if abs(a) < 1e-12:
+        return (sum(p[0] for p in points) / n, sum(p[1] for p in points) / n)
+    cx = cy = 0.0
+    for i in range(n):
+        x0, y0 = points[i]
+        x1, y1 = points[(i + 1) % n]
+        cross = x0 * y1 - x1 * y0
+        cx += (x0 + x1) * cross
+        cy += (y0 + y1) * cross
+    return (cx / (6.0 * a), cy / (6.0 * a))
+
+
+def rotate_point(p: Point, theta: float, center: Point = (0.0, 0.0)) -> Point:
+    """Rotate a point ``theta`` radians CCW about ``center``."""
+    c = math.cos(theta)
+    s = math.sin(theta)
+    dx = p[0] - center[0]
+    dy = p[1] - center[1]
+    return (center[0] + dx * c - dy * s, center[1] + dx * s + dy * c)
+
+
+def rotate_element(e, theta: float, center: Point = (0.0, 0.0)):
+    """Return a copy of an IR element rotated ``theta`` radians about ``center``."""
+    if isinstance(e, Line):
+        return Line(rotate_point(e.p0, theta, center), rotate_point(e.p1, theta, center))
+    if isinstance(e, Polyline):
+        return Polyline([rotate_point(p, theta, center) for p in e.points], e.closed)
+    if isinstance(e, Circle):
+        return Circle(rotate_point(e.center, theta, center), e.radius)
+    if isinstance(e, Ellipse):
+        return Ellipse(rotate_point(e.center, theta, center), e.r_major, e.r_minor,
+                       e.rotation + theta)
+    if isinstance(e, Arc):
+        return Arc(rotate_point(e.center, theta, center), e.radius,
+                   e.start_angle + theta, e.end_angle + theta, e.ccw)
+    raise TypeError("Cannot rotate element type: %r" % (type(e),))
+
+
+def sample_element_points(e, n: int = 48) -> List[Point]:
+    """A point cloud approximating an element, for hull / bbox-under-rotation."""
+    if isinstance(e, Line):
+        return [e.p0, e.p1]
+    if isinstance(e, Polyline):
+        return list(e.points)
+    if isinstance(e, Circle):
+        cx, cy = e.center
+        return [(cx + e.radius * math.cos(TWO_PI * i / n),
+                 cy + e.radius * math.sin(TWO_PI * i / n)) for i in range(n)]
+    if isinstance(e, Ellipse):
+        cx, cy = e.center
+        c = math.cos(e.rotation)
+        s = math.sin(e.rotation)
+        pts = []
+        for i in range(n):
+            a = TWO_PI * i / n
+            x = e.r_major * math.cos(a)
+            y = e.r_minor * math.sin(a)
+            pts.append((cx + x * c - y * s, cy + x * s + y * c))
+        return pts
+    if isinstance(e, Arc):
+        cx, cy = e.center
+        sweep = e.sweep()
+        steps = max(2, int(n * sweep / TWO_PI) + 1)
+        sign = 1.0 if e.ccw else -1.0
+        return [(cx + e.radius * math.cos(e.start_angle + sign * sweep * i / steps),
+                 cy + e.radius * math.sin(e.start_angle + sign * sweep * i / steps))
+                for i in range(steps + 1)]
+    raise TypeError("Cannot sample element type: %r" % (type(e),))

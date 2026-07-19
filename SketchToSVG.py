@@ -20,6 +20,7 @@ Design notes
   units, so the IR is populated in cm and the core scales once at emit time.
 """
 
+import math
 import os
 import traceback
 
@@ -28,6 +29,9 @@ import adsk.fusion
 
 from .core import geometry as geom
 from .core import svg as svgwriter
+from .core import loops as looplib
+from .core import fiducials as fidlib
+from .core import fitting as fitlib
 
 # --- constants -------------------------------------------------------------
 CMD_ID = "SketchToSVG_ExportCmd"
@@ -38,6 +42,9 @@ PANEL_ID = "SolidScriptsAddinsPanel"
 
 # Chord tolerance for flattening curves, in centimetres (0.0025 cm = 0.025 mm).
 FLATTEN_TOL_CM = 0.0025
+
+# Rotation search step for auto-fit (degrees).
+FIT_STEP_DEG = 1.0
 
 # Keep event handlers referenced or Python garbage-collects them and events
 # silently stop firing -- the classic Fusion add-in trap.
@@ -137,84 +144,411 @@ def extract_elements(sketch, include_construction):
     return elements
 
 
+# --- per-region (profile) export -------------------------------------------
+def _iter_real_sketch_curves(sketch):
+    """Yield non-construction, non-reference sketch curves across all kinds."""
+    c = sketch.sketchCurves
+    for coll in (c.sketchLines, c.sketchArcs, c.sketchCircles, c.sketchEllipses,
+                 c.sketchFittedSplines, c.sketchFixedSplines,
+                 c.sketchControlPointSplines, c.sketchConicCurves):
+        for i in range(coll.count):
+            cur = coll.item(i)
+            if getattr(cur, "isConstruction", False):
+                continue
+            if getattr(cur, "isReference", False):
+                continue
+            yield cur
+
+
+def _curve_points(sc, project):
+    """2D cm points for a SketchCurve: endpoints for a line, else flattened."""
+    if sc.objectType == adsk.fusion.SketchLine.classType():
+        wg = sc.worldGeometry
+        return [project(wg.startPoint), project(wg.endPoint)]
+    return _flatten_curve(sc.worldGeometry, project)
+
+
+def _curve_key(points):
+    """Geometry-based identity for a curve (order-independent).
+
+    Two profile curves referencing the same sketch edge flatten to identical
+    points, so a key from endpoints + midpoint identifies shared edges and
+    hole-vs-piece matches without relying on entityToken stability (Fusion
+    hands out a fresh Python wrapper per access, so object identity is unsafe).
+    """
+    def r(p):
+        return (round(p[0], 6), round(p[1], 6))
+    a, b = r(points[0]), r(points[-1])
+    m = r(points[len(points) // 2])
+    return tuple(sorted((a, b))) + (m,)
+
+
+def _letter(i):
+    """0->A, 1->B, ... 25->Z, 26->AA, 27->AB (spreadsheet style)."""
+    s = ""
+    i += 1
+    while i > 0:
+        i, rem = divmod(i - 1, 26)
+        s = chr(65 + rem) + s
+    return s
+
+
+def _label_height_cm(elem):
+    """Auto label height (cm): ~1/4 of the piece's smaller dimension, clamped."""
+    minx, miny, maxx, maxy = elem.extents()
+    return max(0.3, min(min(maxx - minx, maxy - miny) * 0.25, 3.0))
+
+
+def _build_loop(loop, project):
+    """Return (element, keyset, cloud, curves, keys) for one profile loop."""
+    pcs = loop.profileCurves
+    curves = []
+    keys = []
+    single_circle = None
+    for j in range(pcs.count):
+        sc = pcs.item(j).sketchEntity
+        pts = _curve_points(sc, project)
+        if len(pts) < 2:
+            continue
+        curves.append(pts)
+        keys.append(_curve_key(pts))
+        if pcs.count == 1 and sc.objectType == adsk.fusion.SketchCircle.classType():
+            single_circle = sc
+    if single_circle is not None:
+        wg = single_circle.worldGeometry
+        elem = geom.Circle(project(wg.center), single_circle.radius)
+        cloud = geom.sample_element_points(elem)
+    else:
+        ring = looplib.chain_loop(curves)
+        elem = geom.Polyline(ring, closed=True)
+        cloud = list(ring)
+    return elem, frozenset(keys), cloud, curves, keys
+
+
+def _all_profile_keys(sketch, project):
+    """Curve keys used by ANY profile loop (for open-curve detection)."""
+    keys = set()
+    profs = sketch.profiles
+    for i in range(profs.count):
+        lps = profs.item(i).profileLoops
+        for li in range(lps.count):
+            pcs = lps.item(li).profileCurves
+            for j in range(pcs.count):
+                pts = _curve_points(pcs.item(j).sketchEntity, project)
+                if len(pts) >= 2:
+                    keys.add(_curve_key(pts))
+    return keys
+
+
+def extract_regions(sketch, target_profiles):
+    """Build piece dicts from profiles, suppressing hole-filler regions.
+
+    Returns (survivors, key_to_pieces, key_points, open_count). Each survivor
+    is a dict with original-orientation geometry (cm): outer element, holes,
+    centroid, letter, cloud (point sample for fitting), and (later) fiducials.
+    """
+    project = _make_projector(sketch)
+
+    raw = []
+    key_points = {}
+    for profile in target_profiles:
+        try:
+            outer_elem = None
+            outer_keys = frozenset()
+            holes = []
+            inner_keysets = []
+            cloud = []
+            lps = profile.profileLoops
+            for li in range(lps.count):
+                loop = lps.item(li)
+                elem, keyset, lcloud, curves, keys = _build_loop(loop, project)
+                for k, pts in zip(keys, curves):
+                    key_points[k] = pts
+                cloud.extend(lcloud)
+                if loop.isOuter:
+                    outer_elem, outer_keys = elem, keyset
+                else:
+                    holes.append(elem)
+                    inner_keysets.append(keyset)
+            if outer_elem is None:
+                continue
+            raw.append({
+                "outer": outer_elem, "holes": holes, "outer_keys": outer_keys,
+                "inner_keysets": inner_keysets, "cloud": cloud,
+            })
+        except Exception:
+            continue  # a loop that won't chain -> skip this profile, keep going
+
+    # Suppress void-fillers: a profile whose outer loop equals another
+    # profile's inner (hole) loop is the disc inside a hole -- not a piece.
+    inner_all = [(idx, ks) for idx, p in enumerate(raw)
+                 for ks in p["inner_keysets"]]
+    survivors = []
+    for idx, p in enumerate(raw):
+        if any(oidx != idx and ks == p["outer_keys"] for oidx, ks in inner_all):
+            continue
+        survivors.append(p)
+
+    for p in survivors:
+        p["centroid"] = geom.polygon_centroid(geom.sample_element_points(p["outer"]))
+        allk = set(p["outer_keys"])
+        for ks in p["inner_keysets"]:
+            allk |= ks
+        p["all_keys"] = allk
+    # Sort top->bottom (larger y first), then left->right; assign A, B, C...
+    survivors.sort(key=lambda p: (-p["centroid"][1], p["centroid"][0]))
+    for i, p in enumerate(survivors):
+        p["letter"] = _letter(i)
+
+    key_to_pieces = {}
+    for i, p in enumerate(survivors):
+        for k in p["all_keys"]:
+            key_to_pieces.setdefault(k, []).append(i)
+
+    all_keys = _all_profile_keys(sketch, project)
+    open_count = 0
+    for sc in _iter_real_sketch_curves(sketch):
+        pts = _curve_points(sc, project)
+        if len(pts) >= 2 and _curve_key(pts) not in all_keys:
+            open_count += 1
+
+    return survivors, key_to_pieces, key_points, open_count
+
+
+def run_per_region_export(sketch, target_profiles, opts):
+    """Fit each region to the bed, write one SVG per piece + a master. Returns a summary."""
+    survivors, key_to_pieces, key_points, open_count = extract_regions(
+        sketch, target_profiles)
+    if not survivors:
+        return ("No closed regions found to export.\n\nDraw closed profiles "
+                "(and slice them with lines), then run again.")
+
+    if opts["fid_enabled"]:
+        for k, idxs in key_to_pieces.items():
+            if len(idxs) < 2:
+                continue  # only shared (cut) edges get fiducials
+            pts = key_points.get(k)
+            if not pts:
+                continue
+            for i in idxs:
+                survivors[i].setdefault("fiducials", []).extend(
+                    fidlib.edge_ticks(pts, survivors[i]["centroid"],
+                                      length=opts["fid_len_cm"],
+                                      spacing=opts["fid_spacing_cm"],
+                                      inset=opts["fid_inset_cm"]))
+
+    unit, sw = opts["unit"], opts["stroke_width"]
+    wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
+    folder, base = opts["folder"], opts["base"]
+
+    written, skipped = [], []
+    master_elements, master_labels = [], []
+    for p in survivors:
+        letter = p["letter"]
+        lh = _label_height_cm(p["outer"])
+        master_elements.append(p["outer"])
+        master_elements.extend(p["holes"])
+        master_labels.append((letter, p["centroid"], lh))
+
+        theta = fitlib.fit_rotation(p["cloud"], wc, hc, step_deg=FIT_STEP_DEG)
+        if theta is None:
+            skipped.append(letter)
+            continue
+        center = p["centroid"]
+        outer_r = geom.rotate_element(p["outer"], theta, center)
+        holes_r = [geom.rotate_element(h, theta, center) for h in p["holes"]]
+        fids_r = [geom.rotate_element(f, theta, center)
+                  for f in p.get("fiducials", [])]
+        labels = [(letter, center, lh)] if opts["label_on_pieces"] else None
+        svg_text = svgwriter.render(
+            [outer_r] + holes_r, unit=unit, stroke_width=sw,
+            fiducials=fids_r or None, fiducial_stroke=opts["fid_color"],
+            labels=labels)
+        with open(os.path.join(folder, "%s_%s.svg" % (base, letter)),
+                  "w", encoding="utf-8") as fp:
+            fp.write(svg_text)
+        written.append(letter)
+
+    master_svg = svgwriter.render(
+        master_elements, unit=unit, stroke_width=sw,
+        fiducial_stroke=opts["fid_color"], labels=master_labels)
+    with open(os.path.join(folder, "%s_MASTER.svg" % base),
+              "w", encoding="utf-8") as fp:
+        fp.write(master_svg)
+
+    lines = ["Exported %d piece file(s) + %s_MASTER.svg to:\n%s\n" % (
+        len(written), base, folder)]
+    lines.append("Pieces: %s" % (", ".join(written) if written else "(none)"))
+    if skipped:
+        lines.append(
+            "\nSKIPPED (don't fit the %g x %g %s bed at any rotation): %s\n"
+            "Increase the bed size or slice these smaller (auto-tiling is a "
+            "future feature)." % (opts["bed_w"], opts["bed_h"], unit,
+                                  ", ".join(skipped)))
+    if open_count:
+        lines.append("\n%d open curve(s) not part of any region were skipped."
+                     % open_count)
+    return "\n".join(lines)
+
+
+def _selected_profiles():
+    """Profiles currently selected in the UI (empty list if none)."""
+    out = []
+    sels = _ui.activeSelections
+    for i in range(sels.count):
+        ent = sels.item(i).entity
+        if ent and ent.objectType == adsk.fusion.Profile.classType():
+            out.append(adsk.fusion.Profile.cast(ent))
+    return out
+
+
 # --- command handlers ------------------------------------------------------
 class ExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         try:
             inputs = args.command.commandInputs
-
             unit = "in" if inputs.itemById("units").selectedItem.index == 0 else "mm"
-            include_construction = inputs.itemById("includeConstruction").value
             stroke_width = inputs.itemById("strokeWidth").value
-
-            sketch = _resolve_sketch()
-            if not sketch:
-                _ui.messageBox(
-                    "No sketch found.\n\nOpen a sketch for edit (double-click it), "
-                    "or select one in the browser tree, then run again.")
-                return
-
-            elements = extract_elements(sketch, include_construction)
-            if not elements:
-                _ui.messageBox(
-                    "That sketch has no exportable profile curves "
-                    "(construction/reference geometry is skipped).")
-                return
-
-            svg_text = svgwriter.render(
-                elements, unit=unit, stroke_width=stroke_width)
-
-            # Choose output path.
-            dlg = _ui.createFileDialog()
-            dlg.title = "Save SVG"
-            dlg.filter = "SVG files (*.svg)"
-            safe_name = "".join(c for c in sketch.name
-                                if c.isalnum() or c in " _-").strip() or "sketch"
-            dlg.initialFilename = safe_name + ".svg"
-            if dlg.showSave() != adsk.core.DialogResults.DialogOK:
-                return
-            path = dlg.filename
-            if not path.lower().endswith(".svg"):
-                path += ".svg"
-
-            with open(path, "w", encoding="utf-8") as fp:
-                fp.write(svg_text)
-
-            bbox = geom.bounding_box(elements)
-            s = geom.cm_to(unit)
-            w = (bbox[2] - bbox[0]) * s
-            h = (bbox[3] - bbox[1]) * s
-            _ui.messageBox(
-                "Exported %d curve(s).\nSize: %.3f x %.3f %s (1:1)\n\n%s" % (
-                    len(elements), w, h, unit, path))
+            if inputs.itemById("exportMode").selectedItem.index == 0:
+                self._export_whole(inputs, unit, stroke_width)
+            else:
+                self._export_regions(inputs, unit, stroke_width)
         except:  # noqa: E722 -- surface any failure to the user
             if _ui:
                 _ui.messageBox("Export failed:\n{}".format(traceback.format_exc()))
+
+    def _export_whole(self, inputs, unit, stroke_width):
+        include_construction = inputs.itemById("includeConstruction").value
+        sketch = _resolve_sketch()
+        if not sketch:
+            _ui.messageBox(
+                "No sketch found.\n\nOpen a sketch for edit (double-click it), "
+                "or select one in the browser tree, then run again.")
+            return
+        elements = extract_elements(sketch, include_construction)
+        if not elements:
+            _ui.messageBox("That sketch has no exportable profile curves "
+                           "(construction/reference geometry is skipped).")
+            return
+        svg_text = svgwriter.render(elements, unit=unit, stroke_width=stroke_width)
+
+        dlg = _ui.createFileDialog()
+        dlg.title = "Save SVG"
+        dlg.filter = "SVG files (*.svg)"
+        safe = "".join(c for c in sketch.name
+                       if c.isalnum() or c in " _-").strip() or "sketch"
+        dlg.initialFilename = safe + ".svg"
+        if dlg.showSave() != adsk.core.DialogResults.DialogOK:
+            return
+        path = dlg.filename
+        if not path.lower().endswith(".svg"):
+            path += ".svg"
+        with open(path, "w", encoding="utf-8") as fp:
+            fp.write(svg_text)
+
+        bbox = geom.bounding_box(elements)
+        s = geom.cm_to(unit)
+        _ui.messageBox("Exported %d curve(s).\nSize: %.3f x %.3f %s (1:1)\n\n%s" % (
+            len(elements), (bbox[2] - bbox[0]) * s, (bbox[3] - bbox[1]) * s,
+            unit, path))
+
+    def _export_regions(self, inputs, unit, stroke_width):
+        # Targets: selected profiles if any, else all profiles of the sketch.
+        profs = _selected_profiles()
+        if profs:
+            sketch = profs[0].parentSketch
+            targets = profs
+        else:
+            sketch = _resolve_sketch()
+            if not sketch:
+                _ui.messageBox(
+                    "No sketch or region found.\n\nOpen a sketch for edit, or "
+                    "select one/more regions, then run again.")
+                return
+            targets = [sketch.profiles.item(i)
+                       for i in range(sketch.profiles.count)]
+            if not targets:
+                _ui.messageBox("That sketch has no closed regions (profiles). "
+                               "Add closed geometry, then run again.")
+                return
+
+        s = geom.cm_to(unit)
+        bed_w = inputs.itemById("bedW").value
+        bed_h = inputs.itemById("bedH").value
+
+        dlg = _ui.createFileDialog()
+        dlg.title = "Choose output folder + base name (per-piece files are added)"
+        dlg.filter = "SVG files (*.svg)"
+        safe = "".join(c for c in sketch.name
+                       if c.isalnum() or c in " _-").strip() or "sketch"
+        dlg.initialFilename = safe + ".svg"
+        if dlg.showSave() != adsk.core.DialogResults.DialogOK:
+            return
+        chosen = dlg.filename
+        folder = os.path.dirname(chosen)
+        base = os.path.splitext(os.path.basename(chosen))[0] or safe
+
+        opts = {
+            "unit": unit, "stroke_width": stroke_width,
+            "bed_w": bed_w, "bed_h": bed_h,
+            "bed_w_cm": bed_w / s, "bed_h_cm": bed_h / s,
+            "fid_enabled": inputs.itemById("fidEnabled").value,
+            "fid_len_cm": inputs.itemById("fidLen").value / 10.0,   # mm -> cm
+            "fid_spacing_cm": inputs.itemById("fidSpacing").value / 10.0,
+            "fid_inset_cm": 0.3,
+            "fid_color": "red",
+            "label_on_pieces": inputs.itemById("labelPieces").value,
+            "folder": folder, "base": base,
+        }
+        _ui.messageBox(run_per_region_export(sketch, targets, opts))
 
 
 class CreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         try:
             inputs = args.command.commandInputs
+            text_list = adsk.core.DropDownStyles.TextListDropDownStyle
 
-            units = inputs.addDropDownCommandInput(
-                "units", "Output units",
-                adsk.core.DropDownStyles.TextListDropDownStyle)
+            mode = inputs.addDropDownCommandInput("exportMode", "Export mode",
+                                                  text_list)
+            mode.listItems.add("Whole sketch (single SVG)", True)   # index 0
+            mode.listItems.add("One file per region", False)        # index 1
+
+            units = inputs.addDropDownCommandInput("units", "Output units",
+                                                   text_list)
             units.listItems.add("Inch", True)      # index 0, default
             units.listItems.add("Millimeter", False)
 
             inputs.addBoolValueInput(
-                "includeConstruction", "Include construction geometry",
+                "includeConstruction",
+                "Include construction geometry (whole-sketch mode)",
                 True, "", False)
 
             inputs.addFloatSpinnerCommandInput(
                 "strokeWidth", "Stroke width (output units)",
                 "", 0.0, 10.0, 0.005, 0.01)
 
+            grp = inputs.addGroupCommandInput("perRegion", "Per-region options")
+            grp.isExpanded = True
+            gi = grp.children
+            gi.addFloatSpinnerCommandInput(
+                "bedW", "Max bed width (output units)", "", 0.1, 100000.0, 0.5, 12.0)
+            gi.addFloatSpinnerCommandInput(
+                "bedH", "Max bed height (output units)", "", 0.1, 100000.0, 0.5, 24.0)
+            gi.addBoolValueInput("fidEnabled", "Alignment fiducials", True, "", True)
+            gi.addFloatSpinnerCommandInput(
+                "fidLen", "Fiducial length (mm)", "", 0.5, 50.0, 0.5, 6.0)
+            gi.addFloatSpinnerCommandInput(
+                "fidSpacing", "Fiducial spacing (mm)", "", 1.0, 1000.0, 1.0, 50.0)
+            gi.addBoolValueInput("labelPieces", "Label pieces on cut files",
+                                 True, "", False)
+
             inputs.addTextBoxCommandInput(
                 "hint", "",
-                "Exports the active/selected sketch's profile curves at true "
-                "1:1 scale. You'll pick the save location next.", 3, True)
+                "Whole-sketch: one 1:1 SVG. Per-region: one SVG per closed "
+                "region (selected regions, else all), auto-rotated to fit the "
+                "bed, plus a MASTER assembly map. You'll pick the output "
+                "folder/name next.", 4, True)
 
             on_exec = ExecuteHandler()
             args.command.execute.add(on_exec)

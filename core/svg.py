@@ -10,12 +10,20 @@ Coordinate handling (the whole point of the tool):
   * SVG's Y axis grows downward while a sketch's grows upward, so every Y is
     flipped: ``y_svg = (maxy - y) * s``. This keeps the cut mask looking the
     same as it does in Fusion.
+
+Per-region export adds two optional inputs:
+  * ``fiducials`` -- IR elements drawn in a separate red ``class="fiducial"``
+    group so they can be retargeted to a pen/score tool or deleted.
+  * ``labels`` -- ``(text, (x_cm, y_cm), height_cm)`` triples drawn as ``<text>``
+    in that same non-cut group (piece-index letters).
 """
+
+import math
 
 from . import geometry as g
 
 
-def _num(v: float, decimals: int) -> str:
+def _num(v, decimals):
     """Fixed-point number with trailing zeros trimmed; never ``-0``."""
     v = round(v, decimals)
     if v == 0.0:
@@ -24,15 +32,66 @@ def _num(v: float, decimals: int) -> str:
     return s if s and s != "-0" else "0"
 
 
+def _element_svg(e, X, Y, n, s):
+    """SVG fragment for one IR element, given the coordinate transforms."""
+    if isinstance(e, g.Line):
+        return '<path d="M %s %s L %s %s" />' % (
+            n(X(e.p0[0])), n(Y(e.p0[1])), n(X(e.p1[0])), n(Y(e.p1[1])))
+
+    if isinstance(e, g.Polyline):
+        pts = e.points
+        if len(pts) < 2:
+            return ""
+        d = "M %s %s" % (n(X(pts[0][0])), n(Y(pts[0][1])))
+        for p in pts[1:]:
+            d += " L %s %s" % (n(X(p[0])), n(Y(p[1])))
+        if e.closed:
+            d += " Z"
+        return '<path d="%s" />' % d
+
+    if isinstance(e, g.Circle):
+        return '<circle cx="%s" cy="%s" r="%s" />' % (
+            n(X(e.center[0])), n(Y(e.center[1])), n(e.radius * s))
+
+    if isinstance(e, g.Arc):
+        sp, ep = e.start_point(), e.end_point()
+        r = n(e.radius * s)
+        large = 1 if e.sweep() > math.pi + 1e-12 else 0
+        # A CCW arc in sketch space renders CCW on the (Y-flipped) page,
+        # which is SVG sweep-flag 0; CW -> flag 1. See test_core.py.
+        sweep_flag = 0 if e.ccw else 1
+        return '<path d="M %s %s A %s %s 0 %d %d %s %s" />' % (
+            n(X(sp[0])), n(Y(sp[1])), r, r, large, sweep_flag,
+            n(X(ep[0])), n(Y(ep[1])))
+
+    if isinstance(e, g.Ellipse):
+        cx, cy = n(X(e.center[0])), n(Y(e.center[1]))
+        rx, ry = n(e.r_major * s), n(e.r_minor * s)
+        deg = n(-math.degrees(e.rotation))  # Y-flip mirrors the major-axis angle
+        return ('<ellipse cx="%s" cy="%s" rx="%s" ry="%s" '
+                'transform="rotate(%s %s %s)" />' % (cx, cy, rx, ry, deg, cx, cy))
+
+    raise TypeError("Unsupported element type: %r" % (type(e),))
+
+
+def _escape(text):
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
 def render(elements, unit="in", stroke_width=0.01, stroke="black",
-           margin=0.0, decimals=4):
+           margin=0.0, decimals=4, fiducials=None, fiducial_stroke="red",
+           labels=None):
     """Return an SVG document string for ``elements`` (cm-space geometry).
 
-    ``stroke_width`` and ``margin`` are expressed in the output ``unit`` (which
-    equals SVG user units here). Many cutters cut the path centreline and
-    ignore stroke width; it is mainly for on-screen visibility.
+    ``stroke_width`` and ``margin`` are in the output ``unit`` (== SVG user
+    units here). ``fiducials`` (IR elements) and ``labels`` (``(text, (x_cm,
+    y_cm), height_cm)``) render in a separate non-cut group.
     """
-    bbox = g.bounding_box(elements)
+    fiducials = fiducials or []
+    labels = labels or []
+
+    bbox = g.bounding_box(list(elements) + list(fiducials))
     if bbox is None:
         raise ValueError("No geometry to export.")
     minx, miny, maxx, maxy = bbox
@@ -51,61 +110,39 @@ def render(elements, unit="in", stroke_width=0.01, stroke="black",
     def n(v):
         return _num(v, decimals)
 
-    body = []
-    for e in elements:
-        if isinstance(e, g.Line):
-            body.append('<path d="M %s %s L %s %s" />' % (
-                n(X(e.p0[0])), n(Y(e.p0[1])), n(X(e.p1[0])), n(Y(e.p1[1]))))
-
-        elif isinstance(e, g.Polyline):
-            pts = e.points
-            if len(pts) < 2:
-                continue
-            d = "M %s %s" % (n(X(pts[0][0])), n(Y(pts[0][1])))
-            for p in pts[1:]:
-                d += " L %s %s" % (n(X(p[0])), n(Y(p[1])))
-            if e.closed:
-                d += " Z"
-            body.append('<path d="%s" />' % d)
-
-        elif isinstance(e, g.Circle):
-            body.append('<circle cx="%s" cy="%s" r="%s" />' % (
-                n(X(e.center[0])), n(Y(e.center[1])), n(e.radius * s)))
-
-        elif isinstance(e, g.Arc):
-            sp, ep = e.start_point(), e.end_point()
-            r = n(e.radius * s)
-            large = 1 if e.sweep() > __import__("math").pi + 1e-12 else 0
-            # A CCW arc in sketch space renders CCW on the (Y-flipped) page,
-            # which is SVG sweep-flag 0; CW -> flag 1. See test_core.py.
-            sweep_flag = 0 if e.ccw else 1
-            body.append('<path d="M %s %s A %s %s 0 %d %d %s %s" />' % (
-                n(X(sp[0])), n(Y(sp[1])), r, r, large, sweep_flag,
-                n(X(ep[0])), n(Y(ep[1]))))
-
-        elif isinstance(e, g.Ellipse):
-            import math
-            cx, cy = n(X(e.center[0])), n(Y(e.center[1]))
-            rx, ry = n(e.r_major * s), n(e.r_minor * s)
-            # Y-flip mirrors the major-axis angle.
-            deg = n(-math.degrees(e.rotation))
-            body.append(
-                '<ellipse cx="%s" cy="%s" rx="%s" ry="%s" '
-                'transform="rotate(%s %s %s)" />' % (
-                    cx, cy, rx, ry, deg, cx, cy))
-        else:
-            raise TypeError("Unsupported element type: %r" % (type(e),))
+    body = [_element_svg(e, X, Y, n, s) for e in elements]
+    body = [frag for frag in body if frag]
 
     header = (
         '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
         '<svg xmlns="http://www.w3.org/2000/svg" version="1.1" '
         'width="%s%s" height="%s%s" viewBox="0 0 %s %s">\n' % (
             n(width), suffix, n(height), suffix, n(width), n(height)))
-    group_open = (
+    parts = [header]
+
+    parts.append(
         '<g fill="none" stroke="%s" stroke-width="%s" '
         'stroke-linecap="round" stroke-linejoin="round">\n' % (
             stroke, n(stroke_width)))
-    group_close = "</g>\n"
-    footer = "</svg>\n"
+    parts.append("\n".join(body) + "\n")
+    parts.append("</g>\n")
 
-    return header + group_open + "\n".join(body) + "\n" + group_close + footer
+    if fiducials or labels:
+        parts.append(
+            '<g class="fiducial" fill="none" stroke="%s" stroke-width="%s" '
+            'stroke-linecap="round" stroke-linejoin="round">\n' % (
+                fiducial_stroke, n(stroke_width)))
+        for e in fiducials:
+            frag = _element_svg(e, X, Y, n, s)
+            if frag:
+                parts.append(frag + "\n")
+        for text, (lx, ly), height_cm in labels:
+            parts.append(
+                '<text x="%s" y="%s" font-size="%s" text-anchor="middle" '
+                'dominant-baseline="central" fill="%s" stroke="none">%s</text>\n' % (
+                    n(X(lx)), n(Y(ly)), n(height_cm * s), fiducial_stroke,
+                    _escape(text)))
+        parts.append("</g>\n")
+
+    parts.append("</svg>\n")
+    return "".join(parts)

@@ -15,6 +15,9 @@ import sys
 
 from core import geometry as g
 from core import svg
+from core import loops
+from core import fiducials
+from core import fitting
 
 
 _failures = []
@@ -129,10 +132,128 @@ def test_units_and_empty():
         check(True, "empty geometry raises ValueError")
 
 
+def test_chain_loop():
+    print("test_chain_loop (order/orientation tolerant closed ring):")
+    # A unit square given as 4 segments, shuffled and some reversed.
+    segs = [
+        [(0, 0), (1, 0)],
+        [(1, 1), (1, 0)],   # reversed
+        [(0, 1), (1, 1)],
+        [(0, 0), (0, 1)],   # reversed
+    ]
+    ring = loops.chain_loop(segs)
+    check(len(ring) == 4, "square chains to 4 unique vertices (got %d)" % len(ring))
+    # Every original corner is present.
+    corners = {(0, 0), (1, 0), (1, 1), (0, 1)}
+    check(set(ring) == corners, "ring visits exactly the 4 corners")
+    # Consecutive vertices are adjacent (unit edges only, no diagonals).
+    ok = True
+    for a, b in zip(ring, ring[1:] + ring[:1]):
+        if not approx(math.hypot(b[0] - a[0], b[1] - a[1]), 1.0):
+            ok = False
+    check(ok, "consecutive vertices are connected edges (no diagonal jumps)")
+
+    # A multi-point polyline segment (flattened arc) chains too.
+    segs2 = [[(0, 0), (2, 0)], [(2, 0), (1, 0.5), (0, 0)]]
+    ring2 = loops.chain_loop(segs2)
+    check(len(ring2) == 3, "polyline + line chains into a 3-vertex ring")
+
+    # Disconnected input raises.
+    try:
+        loops.chain_loop([[(0, 0), (1, 0)], [(5, 5), (6, 5)]])
+        check(False, "disconnected loop should raise")
+    except ValueError:
+        check(True, "disconnected loop raises ValueError")
+
+
+def test_edge_ticks():
+    print("test_edge_ticks (perpendicular, correct side + count):")
+    # Horizontal shared edge from (0,0) to (10,0); interior is above (toward +y).
+    edge = [(0, 0), (10, 0)]
+    ticks = fiducials.edge_ticks(edge, toward=(5, 5), length=0.6, spacing=4.0,
+                                 inset=0.3)
+    check(len(ticks) >= 2, "at least end ticks produced (got %d)" % len(ticks))
+    all_perp = True
+    all_up = True
+    right_len = True
+    for t in ticks:
+        dx = t.p1[0] - t.p0[0]
+        dy = t.p1[1] - t.p0[1]
+        if not approx(dx, 0.0):
+            all_perp = False           # perpendicular to a horizontal edge => vertical
+        if dy <= 0:
+            all_up = False             # interior is +y
+        if not approx(math.hypot(dx, dy), 0.3):
+            right_len = False          # half of length 0.6
+    check(all_perp, "ticks are perpendicular to the edge")
+    check(all_up, "ticks point toward the interior (+y)")
+    check(right_len, "each tick is length/2 long")
+
+    # Flip the interior side -> ticks point down.
+    ticks_dn = fiducials.edge_ticks(edge, toward=(5, -5), length=0.6, spacing=4.0)
+    check(all(t.p1[1] < t.p0[1] for t in ticks_dn),
+          "interior below -> ticks point -y")
+
+
+def test_fit_rotation():
+    print("test_fit_rotation (auto-rotate to fit a bed):")
+    # 18 x 6 piece vs a 12 x 24 bed: does NOT fit at 0 (18>12) but fits at 90.
+    rect_18x6 = [(0, 0), (18, 0), (18, 6), (0, 6)]
+    theta = fitting.fit_rotation(rect_18x6, 12, 24, step_deg=1.0)
+    check(theta is not None, "18x6 fits in 12x24 at some rotation")
+    bw, bh = fitting.aabb_size(fitting.rotate_points(rect_18x6, theta))
+    check(bw <= 12 + 1e-6 and bh <= 24 + 1e-6,
+          "rotated 18x6 AABB fits within 12x24 (got %.2f x %.2f)" % (bw, bh))
+    check(approx(theta, math.radians(90), tol=math.radians(0.01)),
+          "18x6 prefers a clean 90 deg (got %.1f deg)" % math.degrees(theta))
+
+    # 10 x 6 already fits a 12 x 24 bed -> theta 0, no rotation.
+    check(fitting.fit_rotation([(0, 0), (10, 0), (10, 6), (0, 6)], 12, 24) == 0.0,
+          "already-fitting piece returns theta=0")
+
+    # A 30 x 30 piece cannot fit a 12 x 24 bed at any angle.
+    big = [(0, 0), (30, 0), (30, 30), (0, 30)]
+    check(fitting.fit_rotation(big, 12, 24) is None,
+          "oversized piece returns None")
+
+    # A long thin bar at 45 deg only fits a smallish square bed when rotated.
+    bar = [(0, 0), (14, 14), (13.3, 14.7), (-0.7, 0.7)]  # ~20 long, ~1 wide, at 45
+    check(fitting.fit_rotation(bar, 2, 22, step_deg=1.0) is not None,
+          "diagonal bar fits a 2x22 bed at a non-orthogonal rotation")
+
+
+def test_svg_fiducials_and_labels():
+    print("test_svg_fiducials_and_labels (separate group + text):")
+    piece = g.Polyline([(0, 0), (5, 0), (5, 5), (0, 5)], closed=True)
+    tick = g.Line((2.5, 0), (2.5, 0.3))
+    out = svg.render([piece], unit="mm", fiducials=[tick],
+                     labels=[("A", (2.5, 2.5), 1.0)])
+    check('class="fiducial"' in out, "a fiducial group is present")
+    check(out.count("<g ") == 2, "exactly two groups (cut + fiducial)")
+    check("<text" in out and ">A<" in out, "label text 'A' emitted")
+    # Label sits inside the fiducial group, not the cut group.
+    frag = out.split('class="fiducial"')[1]
+    check("<text" in frag, "label is inside the fiducial group")
+
+
+def test_rotate_and_centroid():
+    print("test_rotate_and_centroid (geometry helpers):")
+    sq = [(0, 0), (2, 0), (2, 2), (0, 2)]
+    cx, cy = g.polygon_centroid(sq)
+    check(approx(cx, 1) and approx(cy, 1), "square centroid is its center")
+    # Rotating a Circle moves its center, keeps radius.
+    c = g.Circle((2, 0), 1)
+    rc = g.rotate_element(c, math.pi / 2, center=(0, 0))
+    check(approx(rc.center[0], 0) and approx(rc.center[1], 2) and rc.radius == 1,
+          "circle rotates about origin, radius unchanged")
+
+
 def main():
     for t in (test_square_mm, test_inch_scaling, test_bbox_translate_margin,
               test_circle, test_arc_sweep_flag, test_ellipse_extents,
-              test_units_and_empty):
+              test_units_and_empty, test_chain_loop, test_edge_ticks,
+              test_fit_rotation, test_svg_fiducials_and_labels,
+              test_rotate_and_centroid):
         t()
     print()
     if _failures:
