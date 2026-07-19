@@ -160,26 +160,60 @@ def _iter_real_sketch_curves(sketch):
             yield cur
 
 
-def _curve_points(sc, project):
-    """2D cm points for a SketchCurve: endpoints for a line, else flattened."""
-    if sc.objectType == adsk.fusion.SketchLine.classType():
-        wg = sc.worldGeometry
-        return [project(wg.startPoint), project(wg.endPoint)]
-    return _flatten_curve(sc.worldGeometry, project)
+def _g3_points(g3):
+    """2D points for a Curve3D geometry (sketch space): endpoints for a line,
+    else flattened via the evaluator.
+
+    Profile geometry (``ProfileCurve.geometry`` and ``SketchCurve.geometry``)
+    is already in the sketch's own 2D coordinate system, so we take (x, y)
+    directly -- no world->sketch projection. Crucially, ``ProfileCurve.geometry``
+    is *trimmed* to the portion that bounds the profile, so a region bordered by
+    only part of a long shared curve gets just that part (not the whole curve).
+    """
+    if g3.objectType == adsk.core.Line3D.classType():
+        return [(g3.startPoint.x, g3.startPoint.y),
+                (g3.endPoint.x, g3.endPoint.y)]
+    ev = g3.evaluator
+    ok, tmin, tmax = ev.getParameterExtents()
+    if not ok:
+        return []
+    ok, pts = ev.getStrokes(tmin, tmax, FLATTEN_TOL_CM)
+    if not ok or not pts:
+        return []
+    return [(p.x, p.y) for p in pts]
+
+
+def _arclen_midpoint(points):
+    """Geometric mid-of-curve by arc length -- independent of traversal direction."""
+    if len(points) == 2:
+        return ((points[0][0] + points[1][0]) / 2.0,
+                (points[0][1] + points[1][1]) / 2.0)
+    seg = [math.hypot(b[0] - a[0], b[1] - a[1])
+           for a, b in zip(points, points[1:])]
+    half = sum(seg) / 2.0
+    acc = 0.0
+    for i, d in enumerate(seg):
+        if d > 0 and acc + d >= half:
+            t = (half - acc) / d
+            a, b = points[i], points[i + 1]
+            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        acc += d
+    return points[len(points) // 2]
 
 
 def _curve_key(points):
-    """Geometry-based identity for a curve (order-independent).
+    """Geometry-based identity for a curve, independent of traversal direction.
 
-    Two profile curves referencing the same sketch edge flatten to identical
-    points, so a key from endpoints + midpoint identifies shared edges and
-    hole-vs-piece matches without relying on entityToken stability (Fusion
-    hands out a fresh Python wrapper per access, so object identity is unsafe).
+    Same sketch edge (bordering two regions, possibly traced opposite ways)
+    yields the same key: sorted endpoints + the arc-length midpoint (the
+    midpoint distinguishes a line from an arc with the same endpoints). Avoids
+    entityToken (Fusion hands out a fresh wrapper per access, so object
+    identity is unsafe).
     """
     def r(p):
         return (round(p[0], 6), round(p[1], 6))
     a, b = r(points[0]), r(points[-1])
-    m = r(points[len(points) // 2])
+    m = r(_arclen_midpoint(points))
     return tuple(sorted((a, b))) + (m,)
 
 
@@ -199,24 +233,29 @@ def _label_height_cm(elem):
     return max(0.3, min(min(maxx - minx, maxy - miny) * 0.25, 3.0))
 
 
-def _build_loop(loop, project):
-    """Return (element, keyset, cloud, curves, keys) for one profile loop."""
+def _build_loop(loop):
+    """Return (element, keyset, cloud, curves, keys) for one profile loop.
+
+    Uses each ``ProfileCurve.geometry`` -- the trimmed, sketch-space curve that
+    bounds this profile -- so partial edges of long shared curves come in only
+    to the extent they border this region.
+    """
     pcs = loop.profileCurves
     curves = []
     keys = []
-    single_circle = None
+    circle_geo = None
     for j in range(pcs.count):
-        sc = pcs.item(j).sketchEntity
-        pts = _curve_points(sc, project)
+        g3 = pcs.item(j).geometry
+        pts = _g3_points(g3)
         if len(pts) < 2:
             continue
         curves.append(pts)
         keys.append(_curve_key(pts))
-        if pcs.count == 1 and sc.objectType == adsk.fusion.SketchCircle.classType():
-            single_circle = sc
-    if single_circle is not None:
-        wg = single_circle.worldGeometry
-        elem = geom.Circle(project(wg.center), single_circle.radius)
+        if pcs.count == 1 and g3.objectType == adsk.core.Circle3D.classType():
+            circle_geo = g3
+    if circle_geo is not None:
+        c = circle_geo.center
+        elem = geom.Circle((c.x, c.y), circle_geo.radius)
         cloud = geom.sample_element_points(elem)
     else:
         ring = looplib.chain_loop(curves)
@@ -225,8 +264,12 @@ def _build_loop(loop, project):
     return elem, frozenset(keys), cloud, curves, keys
 
 
-def _all_profile_keys(sketch, project):
-    """Curve keys used by ANY profile loop (for open-curve detection)."""
+def _all_profile_entity_keys(sketch):
+    """Full-entity curve keys used by ANY profile (for open-curve detection).
+
+    Uses the *untrimmed* ``sketchEntity.geometry`` so keys line up with the
+    sketch curves compared against in the open-curve scan.
+    """
     keys = set()
     profs = sketch.profiles
     for i in range(profs.count):
@@ -234,7 +277,7 @@ def _all_profile_keys(sketch, project):
         for li in range(lps.count):
             pcs = lps.item(li).profileCurves
             for j in range(pcs.count):
-                pts = _curve_points(pcs.item(j).sketchEntity, project)
+                pts = _g3_points(pcs.item(j).sketchEntity.geometry)
                 if len(pts) >= 2:
                     keys.add(_curve_key(pts))
     return keys
@@ -247,8 +290,6 @@ def extract_regions(sketch, target_profiles):
     is a dict with original-orientation geometry (cm): outer element, holes,
     centroid, letter, cloud (point sample for fitting), and (later) fiducials.
     """
-    project = _make_projector(sketch)
-
     raw = []
     key_points = {}
     for profile in target_profiles:
@@ -261,7 +302,7 @@ def extract_regions(sketch, target_profiles):
             lps = profile.profileLoops
             for li in range(lps.count):
                 loop = lps.item(li)
-                elem, keyset, lcloud, curves, keys = _build_loop(loop, project)
+                elem, keyset, lcloud, curves, keys = _build_loop(loop)
                 for k, pts in zip(keys, curves):
                     key_points[k] = pts
                 cloud.extend(lcloud)
@@ -305,10 +346,10 @@ def extract_regions(sketch, target_profiles):
         for k in p["all_keys"]:
             key_to_pieces.setdefault(k, []).append(i)
 
-    all_keys = _all_profile_keys(sketch, project)
+    all_keys = _all_profile_entity_keys(sketch)
     open_count = 0
     for sc in _iter_real_sketch_curves(sketch):
-        pts = _curve_points(sc, project)
+        pts = _g3_points(sc.geometry)
         if len(pts) >= 2 and _curve_key(pts) not in all_keys:
             open_count += 1
 
@@ -341,6 +382,9 @@ def run_per_region_export(sketch, target_profiles, opts):
     wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
     folder, base = opts["folder"], opts["base"]
 
+    # A single region needs no letter suffix and no assembly map.
+    single = len(survivors) == 1
+
     written, skipped = [], []
     master_elements, master_labels = [], []
     for p in survivors:
@@ -359,47 +403,46 @@ def run_per_region_export(sketch, target_profiles, opts):
         holes_r = [geom.rotate_element(h, theta, center) for h in p["holes"]]
         fids_r = [geom.rotate_element(f, theta, center)
                   for f in p.get("fiducials", [])]
-        labels = [(letter, center, lh)] if opts["label_on_pieces"] else None
+        labels = ([(letter, center, lh)]
+                  if opts["label_on_pieces"] and not single else None)
         svg_text = svgwriter.render(
             [outer_r] + holes_r, unit=unit, stroke_width=sw,
             fiducials=fids_r or None, fiducial_stroke=opts["fid_color"],
             labels=labels)
-        with open(os.path.join(folder, "%s_%s.svg" % (base, letter)),
-                  "w", encoding="utf-8") as fp:
+        fname = "%s.svg" % base if single else "%s_%s.svg" % (base, letter)
+        with open(os.path.join(folder, fname), "w", encoding="utf-8") as fp:
             fp.write(svg_text)
         written.append(letter)
 
-    master_svg = svgwriter.render(
-        master_elements, unit=unit, stroke_width=sw,
-        fiducial_stroke=opts["fid_color"], labels=master_labels)
-    with open(os.path.join(folder, "%s_MASTER.svg" % base),
-              "w", encoding="utf-8") as fp:
-        fp.write(master_svg)
+    if not single:
+        master_svg = svgwriter.render(
+            master_elements, unit=unit, stroke_width=sw,
+            fiducial_stroke=opts["fid_color"], labels=master_labels)
+        with open(os.path.join(folder, "%s_MASTER.svg" % base),
+                  "w", encoding="utf-8") as fp:
+            fp.write(master_svg)
 
-    lines = ["Exported %d piece file(s) + %s_MASTER.svg to:\n%s\n" % (
-        len(written), base, folder)]
-    lines.append("Pieces: %s" % (", ".join(written) if written else "(none)"))
-    if skipped:
-        lines.append(
-            "\nSKIPPED (don't fit the %g x %g %s bed at any rotation): %s\n"
-            "Increase the bed size or slice these smaller (auto-tiling is a "
-            "future feature)." % (opts["bed_w"], opts["bed_h"], unit,
-                                  ", ".join(skipped)))
+    if single:
+        if written:
+            lines = ["Exported 1 region to:\n%s" % os.path.join(
+                folder, "%s.svg" % base)]
+        else:
+            lines = ["The single region does not fit the %g x %g %s bed at any "
+                     "rotation." % (opts["bed_w"], opts["bed_h"], unit)]
+    else:
+        lines = ["Exported %d piece file(s) + %s_MASTER.svg to:\n%s\n" % (
+            len(written), base, folder)]
+        lines.append("Pieces: %s" % (", ".join(written) if written else "(none)"))
+        if skipped:
+            lines.append(
+                "\nSKIPPED (don't fit the %g x %g %s bed at any rotation): %s\n"
+                "Increase the bed size or slice these smaller (auto-tiling is a "
+                "future feature)." % (opts["bed_w"], opts["bed_h"], unit,
+                                      ", ".join(skipped)))
     if open_count:
         lines.append("\n%d open curve(s) not part of any region were skipped."
                      % open_count)
     return "\n".join(lines)
-
-
-def _selected_profiles():
-    """Profiles currently selected in the UI (empty list if none)."""
-    out = []
-    sels = _ui.activeSelections
-    for i in range(sels.count):
-        ent = sels.item(i).entity
-        if ent and ent.objectType == adsk.fusion.Profile.classType():
-            out.append(adsk.fusion.Profile.cast(ent))
-    return out
 
 
 # --- command handlers ------------------------------------------------------
@@ -453,8 +496,14 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             unit, path))
 
     def _export_regions(self, inputs, unit, stroke_width):
-        # Targets: selected profiles if any, else all profiles of the sketch.
-        profs = _selected_profiles()
+        # Targets: profiles picked in the Regions input, else all of the sketch.
+        profs = []
+        sel_in = inputs.itemById("regions")
+        if sel_in:
+            for i in range(sel_in.selectionCount):
+                ent = sel_in.selection(i).entity
+                if ent and ent.objectType == adsk.fusion.Profile.classType():
+                    profs.append(adsk.fusion.Profile.cast(ent))
         if profs:
             sketch = profs[0].parentSketch
             targets = profs
@@ -513,6 +562,25 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                                                   text_list)
             mode.listItems.add("Whole sketch (single SVG)", True)   # index 0
             mode.listItems.add("One file per region", False)        # index 1
+
+            # Explicit region picker (per-region mode). Captured here in the
+            # command so it survives the dialog opening -- Fusion clears the
+            # canvas pre-selection when a command starts, so reading
+            # activeSelections at execute time is unreliable. Seed it from
+            # whatever the user had selected when they launched the command.
+            regions = inputs.addSelectionInput(
+                "regions", "Regions",
+                "Pick closed regions to export (leave empty = all regions)")
+            regions.addSelectionFilter("Profiles")
+            regions.setSelectionLimits(0, 0)  # 0 min, 0 max => unlimited
+            try:
+                sels = _ui.activeSelections
+                for i in range(sels.count):
+                    ent = sels.item(i).entity
+                    if ent and ent.objectType == adsk.fusion.Profile.classType():
+                        regions.addSelection(ent)
+            except:  # noqa: E722 -- seeding is best-effort
+                pass
 
             units = inputs.addDropDownCommandInput("units", "Output units",
                                                    text_list)
