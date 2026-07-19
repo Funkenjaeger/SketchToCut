@@ -13,5 +13,9 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Exported output (don't commit generated SVGs)
+# Exported output (don't commit generated cut files)
 *.svg
+*.dxf
+
+# Per-user remembered dialog settings
+settings.json

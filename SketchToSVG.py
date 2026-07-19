@@ -20,6 +20,7 @@ Design notes
   units, so the IR is populated in cm and the core scales once at emit time.
 """
 
+import json
 import math
 import os
 import traceback
@@ -29,9 +30,21 @@ import adsk.fusion
 
 from .core import geometry as geom
 from .core import svg as svgwriter
+from .core import dxf as dxfwriter
 from .core import loops as looplib
 from .core import fiducials as fidlib
 from .core import fitting as fitlib
+
+
+def _render_doc(elements, unit, fmt, stroke_width, fid_color="red",
+                fiducials=None, labels=None):
+    """Render IR elements to the chosen format; returns (text, extension)."""
+    if fmt == "dxf":
+        return (dxfwriter.render(elements, unit=unit, fiducials=fiducials,
+                                 labels=labels), "dxf")
+    return (svgwriter.render(elements, unit=unit, stroke_width=stroke_width,
+                             fiducials=fiducials, fiducial_stroke=fid_color,
+                             labels=labels), "svg")
 
 # --- constants -------------------------------------------------------------
 CMD_ID = "SketchToSVG_ExportCmd"
@@ -51,6 +64,94 @@ FIT_STEP_DEG = 1.0
 _handlers = []
 _app = None
 _ui = None
+
+
+# --- settings persistence (remember dialog values between runs) -------------
+def _settings_path():
+    return os.path.join(os.path.dirname(__file__), "settings.json")
+
+
+def _load_settings():
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as fp:
+            return json.load(fp)
+    except Exception:
+        return {}
+
+
+def _save_settings(data):
+    try:
+        with open(_settings_path(), "w", encoding="utf-8") as fp:
+            json.dump(data, fp, indent=2)
+    except Exception:
+        pass  # persistence is best-effort; never break an export over it
+
+
+def _all_inputs(inputs):
+    """Flatten a CommandInputs collection, descending into groups/tabs."""
+    result = []
+    for i in range(inputs.count):
+        inp = inputs.item(i)
+        result.append(inp)
+        try:
+            if inp.objectType in (adsk.core.GroupCommandInput.classType(),
+                                  adsk.core.TabCommandInput.classType()):
+                result.extend(_all_inputs(inp.children))
+        except Exception:
+            pass
+    return result
+
+
+def _input_value(inp):
+    """JSON-serialisable value for a persistable input, else None to skip it."""
+    try:
+        ot = inp.objectType
+        if ot == adsk.core.DropDownCommandInput.classType():
+            return inp.selectedItem.index
+        if ot == adsk.core.BoolValueCommandInput.classType():
+            return bool(inp.value)
+        if ot == adsk.core.FloatSpinnerCommandInput.classType():
+            return float(inp.value)
+        if ot == adsk.core.StringValueCommandInput.classType():
+            return inp.value
+    except Exception:
+        pass
+    return None
+
+
+def _set_input_value(inp, val):
+    try:
+        ot = inp.objectType
+        if ot == adsk.core.DropDownCommandInput.classType():
+            n = inp.listItems.count
+            if isinstance(val, int) and 0 <= val < n:
+                inp.listItems.item(val).isSelected = True
+        elif ot == adsk.core.BoolValueCommandInput.classType():
+            inp.value = bool(val)
+        elif ot == adsk.core.FloatSpinnerCommandInput.classType():
+            inp.value = float(val)
+        elif ot == adsk.core.StringValueCommandInput.classType():
+            inp.value = str(val)
+    except Exception:
+        pass  # ignore stale/out-of-range persisted values
+
+
+def _capture_settings(inputs):
+    out = {}
+    for inp in _all_inputs(inputs):
+        val = _input_value(inp)
+        if val is not None:
+            out[inp.id] = val
+    return out
+
+
+def _apply_settings(inputs):
+    data = _load_settings()
+    if not data:
+        return
+    for inp in _all_inputs(inputs):
+        if inp.id in data:
+            _set_input_value(inp, data[inp.id])
 
 
 # --- geometry extraction ---------------------------------------------------
@@ -379,6 +480,8 @@ def run_per_region_export(sketch, target_profiles, opts):
                                       inset=opts["fid_inset_cm"]))
 
     unit, sw = opts["unit"], opts["stroke_width"]
+    fmt = opts.get("fmt", "svg")
+    ext = "dxf" if fmt == "dxf" else "svg"
     wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
     folder, base = opts["folder"], opts["base"]
 
@@ -408,34 +511,31 @@ def run_per_region_export(sketch, target_profiles, opts):
                   for f in p.get("fiducials", [])]
         labels = ([(letter, center, lh)]
                   if opts["label_on_pieces"] and not single else None)
-        svg_text = svgwriter.render(
-            [outer_r] + holes_r, unit=unit, stroke_width=sw,
-            fiducials=fids_r or None, fiducial_stroke=opts["fid_color"],
-            labels=labels)
-        fname = "%s.svg" % base if single else "%s_%s.svg" % (base, letter)
+        doc, _e = _render_doc([outer_r] + holes_r, unit, fmt, sw,
+                              opts["fid_color"], fids_r or None, labels)
+        fname = "%s.%s" % (base, ext) if single else "%s_%s.%s" % (base, letter, ext)
         with open(os.path.join(folder, fname), "w", encoding="utf-8") as fp:
-            fp.write(svg_text)
+            fp.write(doc)
         written.append(letter)
 
     if not single:
-        master_svg = svgwriter.render(
-            master_elements, unit=unit, stroke_width=sw,
-            fiducials=master_fiducials or None,
-            fiducial_stroke=opts["fid_color"], labels=master_labels)
-        with open(os.path.join(folder, "%s_MASTER.svg" % base),
+        master_doc, _e = _render_doc(
+            master_elements, unit, fmt, sw, opts["fid_color"],
+            master_fiducials or None, master_labels)
+        with open(os.path.join(folder, "%s_MASTER.%s" % (base, ext)),
                   "w", encoding="utf-8") as fp:
-            fp.write(master_svg)
+            fp.write(master_doc)
 
     if single:
         if written:
             lines = ["Exported 1 region to:\n%s" % os.path.join(
-                folder, "%s.svg" % base)]
+                folder, "%s.%s" % (base, ext))]
         else:
             lines = ["The single region does not fit the %g x %g %s bed at any "
                      "rotation." % (opts["bed_w"], opts["bed_h"], unit)]
     else:
-        lines = ["Exported %d piece file(s) + %s_MASTER.svg to:\n%s\n" % (
-            len(written), base, folder)]
+        lines = ["Exported %d piece file(s) + %s_MASTER.%s to:\n%s\n" % (
+            len(written), base, ext, folder)]
         lines.append("Pieces: %s" % (", ".join(written) if written else "(none)"))
         if skipped:
             lines.append(
@@ -456,15 +556,18 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             inputs = args.command.commandInputs
             unit = "in" if inputs.itemById("units").selectedItem.index == 0 else "mm"
             stroke_width = inputs.itemById("strokeWidth").value
+            fmt = "dxf" if inputs.itemById("outputFormat").selectedItem.index == 1 \
+                else "svg"
             if inputs.itemById("exportMode").selectedItem.index == 0:
-                self._export_whole(inputs, unit, stroke_width)
+                self._export_whole(inputs, unit, stroke_width, fmt)
             else:
-                self._export_regions(inputs, unit, stroke_width)
+                self._export_regions(inputs, unit, stroke_width, fmt)
+            _save_settings(_capture_settings(inputs))
         except:  # noqa: E722 -- surface any failure to the user
             if _ui:
                 _ui.messageBox("Export failed:\n{}".format(traceback.format_exc()))
 
-    def _export_whole(self, inputs, unit, stroke_width):
+    def _export_whole(self, inputs, unit, stroke_width, fmt):
         include_construction = inputs.itemById("includeConstruction").value
         sketch = _resolve_sketch()
         if not sketch:
@@ -477,21 +580,21 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             _ui.messageBox("That sketch has no exportable profile curves "
                            "(construction/reference geometry is skipped).")
             return
-        svg_text = svgwriter.render(elements, unit=unit, stroke_width=stroke_width)
+        doc, ext = _render_doc(elements, unit, fmt, stroke_width)
 
         dlg = _ui.createFileDialog()
-        dlg.title = "Save SVG"
-        dlg.filter = "SVG files (*.svg)"
+        dlg.title = "Save " + ext.upper()
+        dlg.filter = "%s files (*.%s)" % (ext.upper(), ext)
         safe = "".join(c for c in sketch.name
                        if c.isalnum() or c in " _-").strip() or "sketch"
-        dlg.initialFilename = safe + ".svg"
+        dlg.initialFilename = "%s.%s" % (safe, ext)
         if dlg.showSave() != adsk.core.DialogResults.DialogOK:
             return
         path = dlg.filename
-        if not path.lower().endswith(".svg"):
-            path += ".svg"
+        if not path.lower().endswith("." + ext):
+            path += "." + ext
         with open(path, "w", encoding="utf-8") as fp:
-            fp.write(svg_text)
+            fp.write(doc)
 
         bbox = geom.bounding_box(elements)
         s = geom.cm_to(unit)
@@ -499,7 +602,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             len(elements), (bbox[2] - bbox[0]) * s, (bbox[3] - bbox[1]) * s,
             unit, path))
 
-    def _export_regions(self, inputs, unit, stroke_width):
+    def _export_regions(self, inputs, unit, stroke_width, fmt):
         # Targets: profiles picked in the Regions input, else all of the sketch.
         profs = []
         sel_in = inputs.itemById("regions")
@@ -528,13 +631,14 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
         s = geom.cm_to(unit)
         bed_w = inputs.itemById("bedW").value
         bed_h = inputs.itemById("bedH").value
+        ext = "dxf" if fmt == "dxf" else "svg"
 
         dlg = _ui.createFileDialog()
         dlg.title = "Choose output folder + base name (per-piece files are added)"
-        dlg.filter = "SVG files (*.svg)"
+        dlg.filter = "%s files (*.%s)" % (ext.upper(), ext)
         safe = "".join(c for c in sketch.name
                        if c.isalnum() or c in " _-").strip() or "sketch"
-        dlg.initialFilename = safe + ".svg"
+        dlg.initialFilename = "%s.%s" % (safe, ext)
         if dlg.showSave() != adsk.core.DialogResults.DialogOK:
             return
         chosen = dlg.filename
@@ -542,7 +646,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
         base = os.path.splitext(os.path.basename(chosen))[0] or safe
 
         opts = {
-            "unit": unit, "stroke_width": stroke_width,
+            "unit": unit, "stroke_width": stroke_width, "fmt": fmt,
             "bed_w": bed_w, "bed_h": bed_h,
             "bed_w_cm": bed_w / s, "bed_h_cm": bed_h / s,
             "fid_enabled": inputs.itemById("fidEnabled").value,
@@ -551,6 +655,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             "fid_inset_cm": 0.3,
             "fid_color": "red",
             "label_on_pieces": inputs.itemById("labelPieces").value,
+            "tile_rotation_deg": inputs.itemById("tileRotation").value,
             "folder": folder, "base": base,
         }
         _ui.messageBox(run_per_region_export(sketch, targets, opts))
@@ -586,6 +691,11 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             except:  # noqa: E722 -- seeding is best-effort
                 pass
 
+            fmt = inputs.addDropDownCommandInput("outputFormat", "Output format",
+                                                 text_list)
+            fmt.listItems.add("SVG (vinyl cutter)", True)   # index 0, default
+            fmt.listItems.add("DXF (laser / SendCutSend)", False)  # index 1
+
             units = inputs.addDropDownCommandInput("units", "Output units",
                                                    text_list)
             units.listItems.add("Inch", True)      # index 0, default
@@ -614,13 +724,18 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 "fidSpacing", "Fiducial spacing (mm)", "", 1.0, 1000.0, 1.0, 50.0)
             gi.addBoolValueInput("labelPieces", "Label pieces on cut files",
                                  True, "", False)
+            gi.addFloatSpinnerCommandInput(
+                "tileRotation", "Tile grid rotation (deg)", "", 0.0, 90.0, 1.0, 0.0)
 
             inputs.addTextBoxCommandInput(
                 "hint", "",
-                "Whole-sketch: one 1:1 SVG. Per-region: one SVG per closed "
-                "region (selected regions, else all), auto-rotated to fit the "
-                "bed, plus a MASTER assembly map. You'll pick the output "
-                "folder/name next.", 4, True)
+                "Whole-sketch: one 1:1 file. Per-region: one file per closed "
+                "region (selected, else all), auto-rotated to fit the bed; "
+                "regions too big to fit are tiled. Plus a MASTER assembly map. "
+                "SVG for the vinyl cutter, DXF for laser/SendCutSend.", 4, True)
+
+            # Restore last-used values (overrides the hard-coded defaults above).
+            _apply_settings(inputs)
 
             on_exec = ExecuteHandler()
             args.command.execute.add(on_exec)

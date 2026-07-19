@@ -15,6 +15,7 @@ import sys
 
 from core import geometry as g
 from core import svg
+from core import dxf
 from core import loops
 from core import fiducials
 from core import fitting
@@ -248,12 +249,60 @@ def test_rotate_and_centroid():
           "circle rotates about origin, radius unchanged")
 
 
+def _dxf_pairs(text):
+    toks = text.split("\n")
+    pairs = []
+    i = 0
+    while i + 1 < len(toks):
+        pairs.append((toks[i].strip(), toks[i + 1]))
+        i += 2
+    return pairs
+
+
+def test_dxf():
+    print("test_dxf (R12 structure + 1:1 scale, no ezdxf needed):")
+    square = g.Polyline([(0, 0), (10, 0), (10, 10), (0, 10)], closed=True)
+    out = dxf.render([square], unit="mm")
+    check(out.startswith("0\nSECTION"), "starts with a SECTION")
+    check(out.rstrip().endswith("EOF"), "ends with EOF")
+    check("AC1009" in out, "declares R12 (AC1009)")
+    check("POLYLINE" in out and "VERTEX" in out and "SEQEND" in out,
+          "closed polyline via POLYLINE/VERTEX/SEQEND")
+
+    pairs = _dxf_pairs(out)
+    check(all(c.lstrip("-").isdigit() for c, _ in pairs),
+          "every group code is an integer (code/value pairing intact)")
+
+    # $INSUNITS == 4 (mm).
+    iu = next((pairs[i + 1][1] for i, (c, v) in enumerate(pairs)
+               if v == "$INSUNITS"), None)
+    check(iu == "4", "mm flagged as $INSUNITS=4 (got %s)" % iu)
+
+    # Gather VERTEX coordinates and confirm the 100mm span.
+    verts = []
+    for idx, (c, v) in enumerate(pairs):
+        if c == "0" and v == "VERTEX":
+            xs = [float(v2) for c2, v2 in pairs[idx + 1:idx + 6] if c2 == "10"]
+            ys = [float(v2) for c2, v2 in pairs[idx + 1:idx + 6] if c2 == "20"]
+            if xs and ys:
+                verts.append((xs[0], ys[0]))
+    check(len(verts) == 4, "4 vertices emitted (got %d)" % len(verts))
+    vx = [p[0] for p in verts]
+    vy = [p[1] for p in verts]
+    check(approx(max(vx) - min(vx), 100) and approx(max(vy) - min(vy), 100),
+          "square is 100x100 mm in DXF (1:1)")
+
+    # DXF is Y-up (no flip): sketch bottom-left (0,0) maps to (0,0), not (0,100).
+    check((0.0, 0.0) in [(round(x, 6), round(y, 6)) for x, y in verts],
+          "no Y-flip: (0,0) stays at (0,0)")
+
+
 def main():
     for t in (test_square_mm, test_inch_scaling, test_bbox_translate_margin,
               test_circle, test_arc_sweep_flag, test_ellipse_extents,
               test_units_and_empty, test_chain_loop, test_edge_ticks,
               test_fit_rotation, test_svg_fiducials_and_labels,
-              test_rotate_and_centroid):
+              test_rotate_and_centroid, test_dxf):
         t()
     print()
     if _failures:
