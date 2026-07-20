@@ -1,4 +1,4 @@
-"""Integration test for SketchToSVG per-region export using a mock Fusion API.
+"""Integration test for SketchToCut per-region export using a mock Fusion API.
 
 Fakes just the slice of adsk.core / adsk.fusion that extract_regions and
 run_per_region_export touch, then drives the REAL add-in code. Scenarios:
@@ -147,13 +147,13 @@ def rect_pcs(x0, y0, x1, y1):
 
 
 # ---- load the real add-in module as a package submodule -------------------
-pkg = types.ModuleType("stsvg")
+pkg = types.ModuleType("stcut")
 pkg.__path__ = [ADDIN]
-sys.modules["stsvg"] = pkg
+sys.modules["stcut"] = pkg
 spec = importlib.util.spec_from_file_location(
-    "stsvg.SketchToSVG", os.path.join(ADDIN, "SketchToSVG.py"))
+    "stcut.SketchToCut", os.path.join(ADDIN, "SketchToCut.py"))
 m = importlib.util.module_from_spec(spec)
-sys.modules["stsvg.SketchToSVG"] = m
+sys.modules["stcut.SketchToCut"] = m
 spec.loader.exec_module(m)
 
 

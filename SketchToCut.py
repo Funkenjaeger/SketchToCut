@@ -1,7 +1,8 @@
-"""SketchToSVG -- Fusion 360 add-in.
+"""SketchToCut -- Fusion 360 add-in.
 
-Exports the active (or selected) sketch's profile curves to a 1:1-scale SVG
-suitable for a vinyl cutter, for making paper masks to trace/cut plywood etc.
+Exports the active (or selected) sketch's profile curves to 1:1-scale SVG or
+DXF cut files -- paper masks on a vinyl cutter (to trace/cut plywood etc.), or
+DXFs for a laser cutter / SendCutSend.
 
 Design notes
 ------------
@@ -127,10 +128,10 @@ def _render_pieces_doc(piece_groups, unit, fmt, stroke_width, filled=True,
                                     labels=labels), "svg")
 
 # --- constants -------------------------------------------------------------
-CMD_ID = "SketchToSVG_ExportCmd"
-CMD_NAME = "Export Sketch to SVG"
-CMD_TOOLTIP = ("Export the active sketch's profile curves to a 1:1-scale SVG "
-               "for a vinyl cutter.")
+CMD_ID = "SketchToCut_ExportCmd"
+CMD_NAME = "Export Sketch to Cut Files"
+CMD_TOOLTIP = ("Export the active sketch's profile curves to 1:1-scale SVG or "
+               "DXF cut files, auto-rotated and tiled to fit the bed.")
 PANEL_ID = "SolidScriptsAddinsPanel"
 
 # Chord tolerance for flattening curves, in centimetres (0.0025 cm = 0.025 mm).
@@ -919,7 +920,7 @@ def run(context):
             panel.controls.addCommand(cmd_def)
     except:  # noqa: E722
         if _ui:
-            _ui.messageBox("Failed to start SketchToSVG:\n{}".format(
+            _ui.messageBox("Failed to start SketchToCut:\n{}".format(
                 traceback.format_exc()))
 
 
@@ -936,5 +937,5 @@ def stop(context):
         _handlers.clear()
     except:  # noqa: E722
         if _ui:
-            _ui.messageBox("Failed to stop SketchToSVG:\n{}".format(
+            _ui.messageBox("Failed to stop SketchToCut:\n{}".format(
                 traceback.format_exc()))

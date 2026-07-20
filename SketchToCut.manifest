@@ -1,10 +1,10 @@
 {
     "autodeskProduct": "Fusion360",
     "type": "addin",
-    "id": "SketchToSVG-EvanDudzik-0001",
+    "id": "SketchToCut-EvanDudzik-0001",
     "author": "Evan Dudzik",
     "description": {
-        "": "Export the active sketch's profile curves to a 1:1-scale SVG for vinyl-cutter paper masks."
+        "": "Export the active sketch's profile curves to 1:1-scale SVG or DXF cut files, auto-rotated and tiled to fit the cutter bed."
     },
     "version": "0.1.0",
     "runOnStartup": false,

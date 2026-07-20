@@ -1,4 +1,4 @@
-# SketchToSVG
+# SketchToCut
 
 A Fusion 360 add-in that exports a sketch to **1:1-scale SVG or DXF** — for
 cutting paper masks on a vinyl cutter (trace/cut plywood) or sending DXFs to a
@@ -55,16 +55,16 @@ normal location and is exposed to Fusion via a directory junction:
 
 ```
 # Windows (no admin needed):
-mklink /J "%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns\SketchToSVG" "C:\path\to\SketchToSVG"
+mklink /J "%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns\SketchToCut" "C:\path\to\SketchToCut"
 ```
 
 Then in Fusion: **Utilities → Add-Ins (Shift+S) → Add-Ins tab → select
-SketchToSVG → Run** (tick *Run on Startup* to keep it loaded).
+SketchToCut → Run** (tick *Run on Startup* to keep it loaded).
 
 ## Use
 
 1. Open a sketch for edit (double-click it), or select one in the browser.
-2. Click **Export Sketch to SVG** in the Solid tab's *Add-Ins* panel.
+2. Click **Export Sketch to Cut Files** in the Solid tab's *Add-Ins* panel.
 3. Choose units (inch/mm), then a save location.
 
 Only real profile curves are exported; construction and projected/reference
@@ -77,7 +77,7 @@ geometry are skipped (construction can be re-enabled in the dialog).
   `geometry.py` (IR + transforms), `svg.py` / `dxf.py` (writers), `loops.py`
   (chain profile edges into closed rings), `fiducials.py` (tick marks),
   `fitting.py` (fit-under-rotation), `tiling.py` (rectangle clip + grid).
-* **`SketchToSVG.py`** — the add-in: command UI, sketch/profile resolution,
+* **`SketchToCut.py`** — the add-in: command UI, sketch/profile resolution,
   geometry extraction via the Fusion API into the core IR (in centimetres, the
   API's native unit), and settings persistence.
 
