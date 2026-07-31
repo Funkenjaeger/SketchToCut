@@ -93,6 +93,22 @@ def _partition(lo, hi, tile, min_size):
     return bounds
 
 
+def _seam_edges(ring, i, j, ncols, nrows, rx0, rx1, ry0, ry1):
+    """Edges of a closed ``ring`` (already clipped to this tile) that fall on
+    one of the tile's *interior* grid lines -- i.e. a seam shared with a
+    neighboring tile, not the outer bed/material edge."""
+    out = []
+    for a, b in zip(ring, ring[1:] + ring[:1]):
+        internal = (
+            (i > 0 and abs(a[0] - rx0) < _TOL and abs(b[0] - rx0) < _TOL) or
+            (i < ncols - 1 and abs(a[0] - rx1) < _TOL and abs(b[0] - rx1) < _TOL) or
+            (j > 0 and abs(a[1] - ry0) < _TOL and abs(b[1] - ry0) < _TOL) or
+            (j < nrows - 1 and abs(a[1] - ry1) < _TOL and abs(b[1] - ry1) < _TOL))
+        if internal:
+            out.append((a, b))
+    return out
+
+
 def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0, min_size=0.0):
     """Split a piece into bed-sized tiles.
 
@@ -100,9 +116,26 @@ def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0, min_size=0.0):
     closed hole polygons. Returns a list of tile dicts::
 
         {"outer": [...], "holes": [[...], ...], "cut_edges": [(a, b), ...],
-         "row": j, "col": i}
+         "hole_seam_edges": [[(a, b), ...], ...], "row": j, "col": i}
 
     with all coordinates back in the original frame.
+
+    ``cut_edges`` are outer-boundary edges that land on an interior grid
+    line (a tile-to-tile seam) -- used to place matching alignment
+    fiducials on both sides.
+
+    ``hole_seam_edges`` is parallel to ``holes``: for each clipped hole, the
+    edges of *that hole* which also land on an interior grid line. When a
+    hole straddles a tile boundary, the clipped hole re-closes with a new
+    edge running along the same line as the outer boundary's own seam cut
+    (see ``cut_edges``) -- that segment gets cut twice (once tracing the
+    outer boundary, once tracing the hole) since it is emitted as part of
+    two separate closed loops. This field makes that overlap visible to
+    callers (e.g. to skip a duplicate fiducial there, or warn); it does not
+    by itself merge the loops or remove the redundant cut -- doing that
+    correctly requires deciding how the renderer should represent a
+    boundary shared between two closed loops (SVG/DXF here have no notion of
+    "open" cut path), which is a follow-up design choice.
     """
     rot = math.radians(rotation_deg)
     o = _rot(outer, -rot)
@@ -126,26 +159,24 @@ def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0, min_size=0.0):
             if len(co) < 3:
                 continue
             chs = []
+            hole_seams = []
             for h in hs:
                 ch = clip_polygon_rect(h, rx0, ry0, rx1, ry1)
                 if len(ch) >= 3:
                     chs.append(ch)
+                    hole_seams.append(
+                        _seam_edges(ch, i, j, ncols, nrows, rx0, rx1, ry0, ry1))
 
-            cut = []
-            for a, b in zip(co, co[1:] + co[:1]):
-                internal = (
-                    (i > 0 and abs(a[0] - rx0) < _TOL and abs(b[0] - rx0) < _TOL) or
-                    (i < ncols - 1 and abs(a[0] - rx1) < _TOL and abs(b[0] - rx1) < _TOL) or
-                    (j > 0 and abs(a[1] - ry0) < _TOL and abs(b[1] - ry0) < _TOL) or
-                    (j < nrows - 1 and abs(a[1] - ry1) < _TOL and abs(b[1] - ry1) < _TOL))
-                if internal:
-                    cut.append((a, b))
+            cut = _seam_edges(co, i, j, ncols, nrows, rx0, rx1, ry0, ry1)
+
+            def _back(edges):
+                return [(_rot([a], rot)[0], _rot([b], rot)[0]) for a, b in edges]
 
             tiles.append({
                 "outer": _rot(co, rot),
                 "holes": [_rot(ch, rot) for ch in chs],
-                "cut_edges": [(_rot([a], rot)[0], _rot([b], rot)[0])
-                              for a, b in cut],
+                "cut_edges": _back(cut),
+                "hole_seam_edges": [_back(hseam) for hseam in hole_seams],
                 "row": j, "col": i,
             })
     return tiles

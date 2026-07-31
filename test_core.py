@@ -283,6 +283,31 @@ def test_tiling():
     check(len(one) == 1 and not one[0]["cut_edges"],
           "piece smaller than a tile -> 1 tile, no cut edges")
 
+    # A hole straddling a tile boundary re-closes with an edge that
+    # duplicates the outer's own seam cut on that line (item 4 of the
+    # auto-tiling refinements: "holes straddling a tile boundary produce a
+    # doubled cut"). hole_seam_edges surfaces exactly that overlap.
+    outer20 = [(0, 0), (20, 0), (20, 10), (0, 10)]
+    straddle = [(8, 4), (12, 4), (12, 6), (8, 6)]  # crosses x=10
+    tiles_h = tiling.tile_piece(outer20, [straddle], tile_w=10, tile_h=10)
+    check(len(tiles_h) == 2, "20x10 piece with straddling hole -> 2 tiles")
+    for t in tiles_h:
+        seams = t["hole_seam_edges"][0]
+        check(len(seams) == 1, "straddling hole reports exactly 1 seam edge "
+              "in tile (row=%d col=%d), got %d" % (t["row"], t["col"], len(seams)))
+        a, b = seams[0]
+        check(approx(a[0], 10) and approx(b[0], 10),
+              "the reported hole seam edge lies on the tile boundary x=10")
+
+    # A hole fully inside one tile (not touching any boundary) reports no
+    # seam edges for either tile.
+    inside = [(2, 4), (4, 4), (4, 6), (2, 6)]
+    tiles_i = tiling.tile_piece(outer20, [inside], tile_w=10, tile_h=10)
+    for t in tiles_i:
+        seams = [s for hseam in t["hole_seam_edges"] for s in hseam]
+        check(not seams, "hole fully inside a tile -> no hole_seam_edges "
+              "(row=%d col=%d)" % (t["row"], t["col"]))
+
     # Sliver-aware partition.
     check(tiling._partition(0, 13, 12, 3) == [0, 10, 13],
           "sub-min remainder shifts: [0,10,13]")
