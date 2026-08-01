@@ -28,7 +28,12 @@ quoting is otherwise fiddly. This makes it one click.
   fit at any rotation are **auto-tiled** into bed-sized tiles, with a **min tile
   size** that biases toward full-bed tiles and avoids thin slivers.
 * **Alignment fiducials** (perpendicular ticks) on shared cut edges; ticks that
-  would poke out of a thin piece are dropped (both halves).
+  would poke out of a thin piece are dropped (both halves). In **DXF** they go on
+  a dedicated `FIDUCIAL` layer, so a laser workflow can hide or delete the ticks
+  without touching cut geometry (which stays on the per-piece layers). In **SVG**
+  they stay with their piece in the piece's color, so a color-separating vinyl
+  cutter cuts them together. The `ASSEMBLY` reference carries no fiducials —
+  they would vanish under the filled shapes.
 * Dialog settings are **remembered** between runs.
 
 ## Example
