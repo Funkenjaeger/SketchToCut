@@ -395,6 +395,63 @@ def scenario_dxf():
           "a tile DXF is well-formed (POLYLINE + EOF)")
 
 
+def _layer_entity_count(text, layer):
+    """Count DXF entities ASSIGNED to `layer` (group code 8).
+
+    Deliberately not group code 2, which is the layer-table declaration. The
+    bug this guards against left the declaration in place and the layer empty,
+    so a check that looked for the layer's existence would have passed
+    throughout.
+    """
+    lines = [x.strip() for x in text.splitlines()]
+    return sum(1 for i in range(len(lines) - 1)
+               if lines[i] == "8" and lines[i + 1] == layer)
+
+
+def scenario_dxf_fiducial_layer():
+    """Regression guard for the fiducial-routing bug fixed 2026-08-01.
+
+    `_render_pieces_doc` used to concatenate each piece's fiducials into that
+    piece's own `elements` list, so `core.dxf.render_groups` received nothing
+    through its `fiducials=` parameter. The DXF declared a FIDUCIAL layer and
+    left it empty -- so the documented workflow step "delete the non-cut layer
+    before lasering" silently deleted nothing.
+
+    Differential rather than a hard-coded total: the same export with fiducials
+    OFF must yield zero FIDUCIAL entities and with them ON must yield some.
+    A fixed expected count would break every time the tiling changes, and a
+    test that needs updating on unrelated changes gets deleted.
+    """
+    print("scenario_dxf_fiducial_layer (ticks reach the FIDUCIAL layer):")
+
+    def export(fid):
+        piece = Profile([Loop(rect_pcs(0, 0, 30, 30), True)])
+        d = tempfile.mkdtemp()
+        m.run_per_region_export(
+            Sketch([piece]), [piece],
+            opts(d, "laser", unit="mm", bed_w=120, bed_h=240, bed_w_cm=12,
+                 bed_h_cm=24, fid=fid, fmt="dxf"))
+        return {f: read(d, f) for f in sorted(os.listdir(d))}
+
+    off = export(False)
+    on = export(True)
+    n_off = sum(_layer_entity_count(t, "FIDUCIAL") for t in off.values())
+    n_on = sum(_layer_entity_count(t, "FIDUCIAL") for t in on.values())
+
+    check(n_off == 0,
+          "fiducials OFF -> no entities on the FIDUCIAL layer (got %d)" % n_off)
+    check(n_on > 0,
+          "fiducials ON -> ticks actually land on the FIDUCIAL layer (got %d)" % n_on)
+    # The ASSEMBLY file is excluded on purpose: `_write_assembly` builds its
+    # groups with `with_fiducials=False` because the pieces are drawn filled
+    # and ticks would vanish under the fills. It is a reference layout, not a
+    # cut file. Asserting over it would fail for a correct reason.
+    cut = {f: t for f, t in on.items() if not f.endswith("_ASSEMBLY.dxf")}
+    empty = [f for f, t in cut.items() if _layer_entity_count(t, "FIDUCIAL") == 0]
+    check(not empty,
+          "every CUT dxf carries its own ticks (empty: %s)" % (empty or "none"))
+
+
 def main():
     scenario_split()
     scenario_hole()
@@ -405,6 +462,7 @@ def main():
     scenario_one_file()
     scenario_one_file_fiducials()
     scenario_dxf()
+    scenario_dxf_fiducial_layer()
     scenario_trim()
     print()
     if _fail:

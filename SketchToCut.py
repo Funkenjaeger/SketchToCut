@@ -115,14 +115,23 @@ def _render_pieces_doc(piece_groups, unit, fmt, stroke_width, filled=True,
                        labels=None):
     """Render piece groups to the chosen format; returns (text, extension).
 
-    SVG uses filled shapes with per-piece color; DXF stays wireframe (laser cuts
-    paths, not fills) with each piece on its own layer/color.
+    SVG uses filled shapes with per-piece color, fiducials stroked in that
+    same color (so they cut together on a vinyl cutter that separates by
+    color) -- fiducials stay embedded per-piece for that format.
+
+    DXF stays wireframe (laser cuts paths, not fills) with each piece's cut
+    geometry on its own layer/color, but fiducial ticks go on the shared
+    FIDUCIAL layer (render_groups's ``fiducials=`` parameter) so a laser
+    workflow can hide/delete that one layer independent of any piece layer,
+    per the tool's documented layer contract.
     """
     if fmt == "dxf":
-        groups = [{"elements": [g["outer"]] + g["holes"] + g["fiducials"],
+        groups = [{"elements": [g["outer"]] + g["holes"],
                    "layer": g["layer"], "color": g["aci"]}
                   for g in piece_groups]
-        return (dxfwriter.render_groups(groups, unit=unit, labels=labels), "dxf")
+        fiducials = [f for g in piece_groups for f in g["fiducials"]]
+        return (dxfwriter.render_groups(groups, unit=unit, fiducials=fiducials,
+                                        labels=labels), "dxf")
     return (svgwriter.render_pieces(piece_groups, unit=unit,
                                     stroke_width=stroke_width, filled=filled,
                                     labels=labels), "svg")
