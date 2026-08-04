@@ -53,6 +53,28 @@ color-separated column (shown scaled down; true size ≈ 12 × 89 in):
 
 <img src="docs/example-onefile.svg" height="380" alt="One-file output: six colored tiles stacked in a 12-inch column with fiducial ticks and red letters">
 
+### The full workflow, end to end
+
+The images above show the *output*. The whole path, starting from a blank
+sketch:
+
+1. Draw the part in a Fusion sketch.
+2. Either section it into regions yourself, or leave it oversized and let
+   auto-tiling handle it.
+3. Run the add-in — **Export Sketch to Cut Files** — and pick one-file mode,
+   the bed size, the minimum feature size, and the output format.
+4. Out comes a multi-color one-file SVG plus the **ASSEMBLY** reference sheet.
+5. Load the one-file SVG into the vinyl cutter software, separate by color, cut.
+
+A screen recording would show this better than prose, and is worth adding if the
+workflow ever proves confusing enough to warrant one. Keep any media in `docs/` —
+`.gitignore` carries a `!docs/*.svg` exception, so a `*.gif`/`*.png`/`*.mp4`
+exception needs adding beside it before media will commit.
+
+> **If GitHub ever stops rendering the relative SVG `<img>` tags above**, export
+> the examples to PNG and swap the `src` attributes. The tags were confirmed
+> rendering on github.com when they landed.
+
 ## Install
 
 Fusion loads add-ins from its `API/AddIns` folder. The project lives in a
