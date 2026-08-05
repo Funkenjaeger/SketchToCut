@@ -308,6 +308,33 @@ def test_tiling():
         check(not seams, "hole fully inside a tile -> no hole_seam_edges "
               "(row=%d col=%d)" % (t["row"], t["col"]))
 
+    # Item 4 fix: hole_cut_paths() drops the duplicated seam edge instead of
+    # re-closing through it (the outer boundary already cuts that segment).
+    for t in tiles_h:
+        h = t["holes"][0]
+        seams = t["hole_seam_edges"][0]
+        paths = tiling.hole_cut_paths(h, seams)
+        check(len(paths) == 1 and paths[0][1] is False,
+              "straddling hole -> one OPEN cut path, not a re-closed loop "
+              "(row=%d col=%d)" % (t["row"], t["col"]))
+        pts = paths[0][0]
+        edges = [(pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
+        a, b = seams[0]
+        dup = any((approx(p[0], a[0]) and approx(p[1], a[1]) and
+                   approx(q[0], b[0]) and approx(q[1], b[1])) or
+                  (approx(p[0], b[0]) and approx(p[1], b[1]) and
+                   approx(q[0], a[0]) and approx(q[1], a[1]))
+                  for p, q in edges)
+        check(not dup, "open cut path excludes the outer's own seam segment "
+              "(row=%d col=%d)" % (t["row"], t["col"]))
+    for t in tiles_i:
+        if not t["holes"]:
+            continue
+        h = t["holes"][0]
+        paths = tiling.hole_cut_paths(h, [])
+        check(len(paths) == 1 and paths[0][1] is True and paths[0][0] == h,
+              "hole with no seam edges -> unchanged closed ring")
+
     # Sliver-aware partition.
     check(tiling._partition(0, 13, 12, 3) == [0, 10, 13],
           "sub-min remainder shifts: [0,10,13]")

@@ -87,7 +87,9 @@ def _loop_d(e, X, Y, n):
     d = "M %s %s" % (n(X(pts[0][0])), n(Y(pts[0][1])))
     for p in pts[1:]:
         d += " L %s %s" % (n(X(p[0])), n(Y(p[1])))
-    return d + " Z"
+    if getattr(e, "closed", True):
+        d += " Z"
+    return d
 
 
 def render_pieces(pieces, unit="in", stroke_width=0.01, filled=True,

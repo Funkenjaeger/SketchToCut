@@ -109,6 +109,64 @@ def _seam_edges(ring, i, j, ncols, nrows, rx0, rx1, ry0, ry1):
     return out
 
 
+def hole_cut_paths(ring, seam_edges, tol=_TOL):
+    """Split a clipped hole ``ring`` into the paths that should actually be cut.
+
+    ``seam_edges`` (from ``tile_piece``'s ``hole_seam_edges``) are edges of
+    this ring that duplicate the tile's own outer-boundary seam cut on the
+    same grid line (see ``tile_piece``'s docstring) -- the outer polyline
+    already traces that exact segment, so re-cutting it from the hole is a
+    doubled cut on the machine. This drops each matched seam edge from the
+    ring instead of re-closing through it.
+
+    Returns a list of ``(points, closed)`` pairs to emit in place of the
+    single closed ring:
+      * no seam edges matched -> ``[(ring, True)]`` (unchanged).
+      * one contiguous run remains -> a single open path (``closed=False``)
+        covering every edge except the matched seam edge(s); the outer
+        boundary's own pass through that line completes the visual seam.
+      * seam edges are non-adjacent (e.g. a hole clipped at a tile corner,
+        touching two different grid lines) -> multiple open paths, one per
+        surviving run. UNPROVEN beyond the single-seam-edge case exercised
+        by the test suite.
+    """
+    n = len(ring)
+    if n < 2 or not seam_edges:
+        return [(ring, True)]
+
+    def close(p, q):
+        return abs(p[0] - q[0]) < tol and abs(p[1] - q[1]) < tol
+
+    removed = set()
+    for a, b in seam_edges:
+        for i in range(n):
+            p, q = ring[i], ring[(i + 1) % n]
+            if (close(p, a) and close(q, b)) or (close(p, b) and close(q, a)):
+                removed.add(i)
+                break
+
+    if not removed:
+        return [(ring, True)]
+    if len(removed) >= n:
+        return []
+
+    start = next(((i + 1) % n for i in range(n) if i in removed))
+    pieces = []
+    run = [ring[start]]
+    i = start
+    for _ in range(n):
+        if i in removed:
+            if len(run) >= 2:
+                pieces.append((run, False))
+            run = [ring[(i + 1) % n]]
+        else:
+            run.append(ring[(i + 1) % n])
+        i = (i + 1) % n
+    if len(run) >= 2:
+        pieces.append((run, False))
+    return pieces
+
+
 def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0, min_size=0.0):
     """Split a piece into bed-sized tiles.
 

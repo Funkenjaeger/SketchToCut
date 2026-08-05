@@ -79,7 +79,10 @@ def _drop_unfitting_fiducials(pieces):
 def _tile_to_piece(tile, opts):
     """Turn a tiling.tile_piece() dict into an output-piece dict."""
     outer = geom.Polyline(tile["outer"], closed=True)
-    holes = [geom.Polyline(h, closed=True) for h in tile["holes"]]
+    holes = []
+    for h, seams in zip(tile["holes"], tile["hole_seam_edges"]):
+        for pts, closed in tilelib.hole_cut_paths(h, seams):
+            holes.append(geom.Polyline(pts, closed=closed))
     centroid = geom.polygon_centroid(tile["outer"])
     fids = []
     if opts["fid_enabled"]:
