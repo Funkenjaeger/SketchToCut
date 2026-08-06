@@ -258,7 +258,9 @@ def test_tiling():
     print("test_tiling (rect clip + grid split):")
     sq = [(0, 0), (2, 0), (2, 2), (0, 2)]
     clipped = tiling.clip_polygon_rect(sq, 1, 0, 2, 2)   # keep right half
-    xs = [p[0] for p in clipped]
+    check(len(clipped) == 1, "convex clip -> a single loop (got %d)"
+          % len(clipped))
+    xs = [p[0] for p in clipped[0]]
     check(clipped and approx(min(xs), 1) and approx(max(xs), 2),
           "clip to right half keeps x in [1,2]")
     check(tiling.clip_polygon_rect(sq, 5, 5, 6, 6) == [],
@@ -346,6 +348,169 @@ def test_tiling():
           "big remainder kept: [0,12,23]")
     check(tiling._partition(0, 5, 12, 3) == [0, 5],
           "shorter than a tile: single span")
+
+
+def _area(loop):
+    s = 0.0
+    for a, b in zip(loop, loop[1:] + loop[:1]):
+        s += a[0] * b[1] - b[0] * a[1]
+    return abs(0.5 * s)
+
+
+def _seam_overlap(loop, eps=1e-9):
+    """Length of the longest zero-width seam in a closed ``loop``.
+
+    A seam is two *distinct* edges of the same loop that are collinear and
+    overlap along a shared stretch -- the loop doubling back on itself. That
+    is exactly the artefact Sutherland-Hodgman leaves when it bridges two
+    disjoint intersection regions along the tile boundary, and it is what
+    makes the result a single degenerate loop instead of two real ones.
+
+    Deliberately not restricted to *consecutive* edges: in the U-shape case
+    below the bridge is the far end of a long boundary edge, several vertices
+    away from the return trip along the same line.
+    """
+    edges = list(zip(loop, loop[1:] + loop[:1]))
+    worst = 0.0
+    for i in range(len(edges)):
+        p, q = edges[i]
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        dd = dx * dx + dy * dy
+        if dd <= eps:
+            continue
+        for j in range(i + 1, len(edges)):
+            r, s = edges[j]
+            # collinear? both direction and offset cross-products vanish
+            if abs(dx * (s[1] - r[1]) - dy * (s[0] - r[0])) > eps:
+                continue
+            if abs(dx * (r[1] - p[1]) - dy * (r[0] - p[0])) > eps:
+                continue
+            tr = ((r[0] - p[0]) * dx + (r[1] - p[1]) * dy) / dd
+            ts = ((s[0] - p[0]) * dx + (s[1] - p[1]) * dy) / dd
+            lo, hi = min(tr, ts), max(tr, ts)
+            span = min(hi, 1.0) - max(lo, 0.0)
+            if span > 0:
+                worst = max(worst, span * math.sqrt(dd))
+    return worst
+
+
+def test_tiling_concave_disjoint():
+    print("test_tiling_concave_disjoint (item 2: real polygon-rect boolean):")
+    # U-shape, CCW: 10x10 with a notch x in [3,7] cut down to y=3.
+    #   ###   ###      legs:  x in [0,3] and x in [7,10], up to y=10
+    #   ###   ###      base:  y in [0,3], full width
+    #   ##########
+    u = [(0, 0), (10, 0), (10, 10), (7, 10), (7, 3), (3, 3), (3, 10), (0, 10)]
+
+    # A band above the notch floor meets the U in TWO disjoint rectangles.
+    loops = tiling.clip_polygon_rect(u, 0, 5, 10, 10)
+    check(len(loops) == 2,
+          "U-shape clipped above the notch -> 2 separate loops (got %d)"
+          % len(loops))
+    check(all(approx(_area(l), 15.0) for l in loops),
+          "each disjoint loop is a 3x5 region, area 15 (got %s)"
+          % [round(_area(l), 4) for l in loops])
+    for k, l in enumerate(loops):
+        check(_seam_overlap(l) <= 1e-9,
+              "loop %d carries no zero-width seam (longest overlap %.4f)"
+              % (k, _seam_overlap(l)))
+    spans = sorted((min(p[0] for p in l), max(p[0] for p in l)) for l in loops)
+    check(spans == [(0, 3), (7, 10)],
+          "the two loops are the two legs, x in [0,3] and [7,10] (got %s)"
+          % (spans,))
+    check(all(approx(min(p[1] for p in l), 5) and approx(max(p[1] for p in l), 10)
+              for l in loops), "both loops span the band's full height")
+
+    # Same shape, vertical band: crosses both legs and the base -> connected.
+    joined = tiling.clip_polygon_rect(u, 0, 0, 10, 10)
+    check(len(joined) == 1, "band covering the base stays 1 connected loop")
+    check(approx(_area(joined[0]), _area(u)), "connected clip keeps full area")
+
+    # An L-shape sliced by a VERTICAL band (the other axis) -> 2 regions.
+    #   L: tall left arm + a foot along the bottom, notch at top-right.
+    ell = [(0, 0), (10, 0), (10, 3), (3, 3), (3, 10), (0, 10)]
+    lloops = tiling.clip_polygon_rect(ell, 5, 0, 8, 10)
+    check(len(lloops) == 1, "L-shape band right of the arm -> 1 loop (the foot)")
+    # C-shape (notch opening left) sliced by a VERTICAL band -> 2 regions.
+    cee = [(0, 0), (10, 0), (10, 10), (0, 10), (0, 7), (7, 7), (7, 3), (0, 3)]
+    cee_loops = tiling.clip_polygon_rect(cee, 0, 0, 5, 10)
+    check(len(cee_loops) == 2,
+          "C-shape sliced by a vertical band -> 2 loops (got %d)"
+          % len(cee_loops))
+    check(all(approx(_area(l), 15.0) for l in cee_loops),
+          "each vertical-band loop is 5x3, area 15 (got %s)"
+          % [round(_area(l), 4) for l in cee_loops])
+    check(all(_seam_overlap(l) <= 1e-9 for l in cee_loops),
+          "neither vertical-band loop carries a zero-width seam")
+
+    # Three teeth -> three disjoint regions from one clip.
+    comb = [(0, 0), (12, 0), (12, 8), (10, 8), (10, 2), (8, 2), (8, 8),
+            (6, 8), (6, 2), (4, 2), (4, 8), (2, 8), (2, 2), (0, 2)]
+    cloops = tiling.clip_polygon_rect(comb, 0, 4, 12, 8)
+    check(len(cloops) == 3, "3-tooth comb clipped above the gullets -> 3 loops "
+          "(got %d)" % len(cloops))
+    check(approx(sum(_area(l) for l in cloops), 3 * 2 * 4),
+          "the 3 loops total 24 (3 teeth x 2 x 4)")
+    check(all(_seam_overlap(l) <= 1e-9 for l in cloops),
+          "no comb loop carries a zero-width seam")
+
+    # Rect entirely inside the polygon (the ring never touches it).
+    inner = tiling.clip_polygon_rect([(0, 0), (20, 0), (20, 20), (0, 20)],
+                                     5, 5, 8, 9)
+    check(len(inner) == 1 and approx(_area(inner[0]), 12),
+          "rect wholly inside the polygon clips to the whole rect")
+    # Polygon entirely inside the rect comes back unchanged.
+    whole = tiling.clip_polygon_rect(u, -1, -1, 11, 11)
+    check(len(whole) == 1 and whole[0] == u,
+          "polygon wholly inside the rect is returned verbatim")
+    check(tiling.clip_polygon_rect(u, 4, 4, 6, 6) == [],
+          "rect inside the notch (outside the piece) -> no loops")
+
+    # Input winding is preserved, both ways.
+    cw = list(reversed(u))
+    cwloops = tiling.clip_polygon_rect(cw, 0, 5, 10, 10)
+    check(len(cwloops) == 2, "clockwise input also yields 2 loops")
+
+    def signed(loop):
+        s = 0.0
+        for a, b in zip(loop, loop[1:] + loop[:1]):
+            s += a[0] * b[1] - b[0] * a[1]
+        return s
+    check(all(signed(l) > 0 for l in loops) and all(signed(l) < 0 for l in cwloops),
+          "output winding follows the input winding")
+
+    # --- through tile_piece: disjoint regions become separate tiles ---
+    tiles = tiling.tile_piece(u, [], tile_w=10, tile_h=5)
+    check(len(tiles) == 3,
+          "U-shape on a 10x5 grid -> 3 tiles (row 0 whole, row 1 split in 2), "
+          "got %d" % len(tiles))
+    upper = [t for t in tiles if t["row"] == 1]
+    check(len(upper) == 2, "the upper grid cell yields 2 tiles (got %d)"
+          % len(upper))
+    check(all(t["col"] == upper[0]["col"] for t in upper),
+          "both upper tiles report the same grid cell")
+    check(all(approx(_area(t["outer"]), 15.0) for t in upper),
+          "each upper tile is one 3x5 leg")
+    check(all(_seam_overlap(t["outer"]) <= 1e-9 for t in tiles),
+          "no tile outline doubles back on itself")
+    check(approx(sum(_area(t["outer"]) for t in tiles), _area(u)),
+          "the tiles' areas sum to the piece's area (nothing lost or doubled)")
+
+    # Holes land on the component that actually contains them.
+    hl = [(1, 6), (2, 6), (2, 7), (1, 7)]      # in the left leg
+    hr = [(8, 6), (9, 6), (9, 7), (8, 7)]      # in the right leg
+    htiles = [t for t in tiling.tile_piece(u, [hl, hr], tile_w=10, tile_h=5)
+              if t["row"] == 1]
+    check(len(htiles) == 2 and all(len(t["holes"]) == 1 for t in htiles),
+          "each split tile carries exactly one of the two holes (got %s)"
+          % [len(t["holes"]) for t in htiles])
+    okhole = True
+    for t in htiles:
+        ox = [p[0] for p in t["outer"]]
+        hx = [p[0] for p in t["holes"][0]]
+        if not (min(ox) <= min(hx) and max(hx) <= max(ox)):
+            okhole = False
+    check(okhole, "each hole sits inside the tile it was assigned to")
 
 
 def test_one_file_core():
@@ -437,7 +602,7 @@ def main():
               test_units_and_empty, test_chain_loop, test_edge_ticks,
               test_fit_rotation, test_svg_fiducials_and_labels,
               test_rotate_and_centroid, test_dxf, test_tiling,
-              test_one_file_core):
+              test_tiling_concave_disjoint, test_one_file_core):
         t()
     print()
     if _failures:
