@@ -10,6 +10,7 @@ arc sweep-flag convention.
 """
 
 import math
+import random
 import re
 import sys
 
@@ -21,6 +22,7 @@ from core import fiducials
 from core import fitting
 from core import tiling
 from core import palette
+from core import packing
 
 
 _failures = []
@@ -548,6 +550,179 @@ def test_one_file_core():
           "hole -> even-odd compound path (outer + hole subpaths)")
 
 
+def _rects(boxes, bins):
+    """The placed rectangle of every piece, per bin, in bin coordinates."""
+    out = []
+    for b in bins:
+        rs = []
+        for pl in b.placements:
+            minx, miny, maxx, maxy = boxes[pl.index]
+            rs.append((minx + pl.dx, miny + pl.dy, maxx + pl.dx, maxy + pl.dy))
+        out.append(rs)
+    return out
+
+
+def _pack_violations(boxes, bins, bin_w, bin_h, gap, tol=1e-6):
+    """Every way a pack result can be wrong, as a list of readable strings.
+
+    This is the invariant :func:`core.packing.pack` promises, spelled out:
+    nothing escapes its bin, nothing sits closer to a neighbour than ``gap``
+    (which subsumes "nothing overlaps"), every input piece is placed exactly
+    once, and each bin's reported extents match what is actually in it.
+    """
+    bad = []
+    idxs = sorted(pl.index for b in bins for pl in b.placements)
+    if idxs != list(range(len(boxes))):
+        bad.append("placements are not exactly the input pieces (got %s)" % idxs)
+
+    for bi, rs in enumerate(_rects(boxes, bins)):
+        for x0, y0, x1, y1 in rs:
+            if x0 < -tol or y0 < -tol or x1 > bin_w + tol or y1 > bin_h + tol:
+                bad.append("bin %d: piece (%.3f,%.3f)-(%.3f,%.3f) escapes the "
+                           "%.2f x %.2f bin" % (bi, x0, y0, x1, y1, bin_w, bin_h))
+        for i in range(len(rs)):
+            for j in range(i + 1, len(rs)):
+                a, b = rs[i], rs[j]
+                # Separation along each axis; negative means they interpenetrate.
+                sx = max(a[0], b[0]) - min(a[2], b[2])
+                sy = max(a[1], b[1]) - min(a[3], b[3])
+                if max(sx, sy) < gap - tol:
+                    bad.append("bin %d: pieces %d and %d are only %.4f apart "
+                               "(gap %.2f)" % (bi, i, j, max(sx, sy), gap))
+        if rs:
+            w = max(r[2] for r in rs)
+            h = max(r[3] for r in rs)
+            rep = bins[bi]
+            if abs(w - rep.width) > tol or abs(h - rep.height) > tol:
+                bad.append("bin %d reports %.4f x %.4f but holds %.4f x %.4f"
+                           % (bi, rep.width, rep.height, w, h))
+    return bad
+
+
+def _boxes(sizes, spread=0.0):
+    """(minx,miny,maxx,maxy) boxes of the given sizes, optionally scattered so
+    the packer cannot get away with assuming pieces start at the origin."""
+    out = []
+    for k, (w, h) in enumerate(sizes):
+        ox = -3.7 * k * spread
+        oy = 11.3 * k * spread
+        out.append((ox, oy, ox + w, oy + h))
+    return out
+
+
+def test_packing():
+    print("test_packing (bed-bounded shelf packing, one bin per output sheet):")
+    check(packing.pack([], 12, 24, 0.5) == [], "no pieces -> no bins")
+
+    # A piece bigger than the bin is the one legitimate error: fitting.py is
+    # supposed to have rotated it to fit (or tiling.py to have split it).
+    try:
+        packing.pack(_boxes([(30.0, 30.0)]), 12, 24, 0.5)
+        check(False, "oversized piece should raise")
+    except packing.PieceTooLargeError:
+        check(True, "a piece too big for the bin raises PieceTooLargeError")
+    check(issubclass(packing.PieceTooLargeError, ValueError),
+          "PieceTooLargeError is a ValueError (callers can catch either)")
+
+    # Single piece, offset geometry: lands flush in the bin corner.
+    one = packing.pack([(4.0, -7.0, 9.0, -3.0)], 12, 24, 0.5)
+    check(len(one) == 1 and len(one[0].placements) == 1, "1 piece -> 1 bin")
+    pl = one[0].placements[0]
+    check(approx(4.0 + pl.dx, 0.0) and approx(-7.0 + pl.dy, 0.0),
+          "offset piece is translated to the bin origin")
+    check(approx(one[0].width, 5.0) and approx(one[0].height, 4.0),
+          "bin extents are the piece's own size (got %.2f x %.2f)"
+          % (one[0].width, one[0].height))
+
+    # Four 5x4 pieces, 12x24 bed, Y shelves: one column, 4*4 + 3*0.5 tall.
+    # (Matches the arrangement the one-file export produced before packing --
+    # the common small job must not move.)
+    quad = _boxes([(5.0, 4.0)] * 4)
+    ybins = packing.pack(quad, 12, 24, 0.5, "Y")
+    check(len(ybins) == 1, "4 small pieces fit one bed (got %d bins)" % len(ybins))
+    check(approx(ybins[0].height, 4 * 4 + 3 * 0.5) and approx(ybins[0].width, 5.0),
+          "Y shelves stack a single column, 17.5 x 5 (got %.2f x %.2f)"
+          % (ybins[0].height, ybins[0].width))
+    check(not _pack_violations(quad, ybins, 12, 24, 0.5), "the column is legal")
+
+    # Same pieces, X shelves: a row across the 12cm width wraps after two.
+    xbins = packing.pack(quad, 12, 24, 0.5, "X")
+    check(len(xbins) == 1, "X shelves also need only one bed")
+    check(approx(xbins[0].width, 5 + 0.5 + 5) and approx(xbins[0].height, 4 + 0.5 + 4),
+          "X shelves wrap at the 12cm width into 2 rows (got %.2f x %.2f)"
+          % (xbins[0].width, xbins[0].height))
+    check(not _pack_violations(quad, xbins, 12, 24, 0.5), "the rows are legal")
+
+    # THE POINT OF THE FEATURE: more pieces than the bed holds opens another
+    # bed instead of arranging off the end of the material.
+    many = _boxes([(11.0, 7.0)] * 10)
+    mb = packing.pack(many, 12, 24, 0.5, "Y")
+    check(len(mb) > 1, "10 pieces of 11x7 cannot share one 12x24 bed (got %d bins)"
+          % len(mb))
+    check(not _pack_violations(many, mb, 12, 24, 0.5),
+          "every bin of the multi-bin pack stays inside the bed")
+    check(sum(len(b.placements) for b in mb) == 10, "no piece is dropped")
+
+    # Roll stock (spec item 5): a huge bed height is not a special case -- it
+    # just yields a bin nothing can overflow, still wrapped at the bed width.
+    roll_sizes = [(3.0, 2.0)] * 40
+    roll = _boxes(roll_sizes)
+    rb = packing.pack(roll, 12, 999, 0.5, "X")
+    check(len(rb) == 1, "roll stock (12 x 999) packs into one bin (got %d)"
+          % len(rb))
+    check(rb[0].width <= 12 + 1e-9,
+          "roll pack still wraps at the 12cm width (used %.2f)" % rb[0].width)
+    rows = set(round(r[1], 6) for r in _rects(roll, rb)[0])
+    check(len(rows) > 1, "roll pack wrapped onto %d rows, not one long line"
+          % len(rows))
+    check(not _pack_violations(roll, rb, 12, 999, 0.5), "the roll pack is legal")
+    check(len(packing.pack(roll, 12, 999, 0.5, "Y")) == 1,
+          "Y shelves on roll stock also stay in one bin")
+
+    # Deterministic: the same job twice gives the same sheets.
+    check(packing.pack(many, 12, 24, 0.5, "Y") == mb, "packing is deterministic")
+
+    # --- property test: the invariant, over many randomized piece sets ------
+    rng = random.Random(20260808)
+    bad = []
+    runs = 400
+    multi_bin = 0
+    multi_shelf = 0
+    for _ in range(runs):
+        bin_w = rng.uniform(4.0, 40.0)
+        bin_h = rng.uniform(4.0, 40.0)
+        gap = rng.choice([0.0, 0.1, 0.5, 1.0])
+        axis = rng.choice(["X", "Y"])
+        n = rng.randint(1, 30)
+        sizes = [(rng.uniform(0.05, 1.0) * bin_w, rng.uniform(0.05, 1.0) * bin_h)
+                 for _ in range(n)]
+        boxes = [(rng.uniform(-50, 50), rng.uniform(-50, 50), 0.0, 0.0)
+                 for _ in range(n)]
+        boxes = [(b[0], b[1], b[0] + s[0], b[1] + s[1])
+                 for b, s in zip(boxes, sizes)]
+        bins = packing.pack(boxes, bin_w, bin_h, gap, axis)
+        if len(bins) > 1:
+            multi_bin += 1
+        if any(len(set(round(r[1], 6) for r in rs)) > 1
+               or len(set(round(r[0], 6) for r in rs)) > 1
+               for rs in _rects(boxes, bins)):
+            multi_shelf += 1
+        v = _pack_violations(boxes, bins, bin_w, bin_h, gap)
+        if v:
+            bad.append("axis=%s bin=%.2fx%.2f gap=%.2f n=%d: %s"
+                       % (axis, bin_w, bin_h, gap, n, v[0]))
+    check(not bad, "%d randomized packs all satisfy the bin invariant (%d bad, "
+          "first: %s)" % (runs, len(bad), bad[0] if bad else "none"))
+    # A property test that never exercised the interesting states would pass
+    # trivially, so assert the sample actually reached them.
+    check(multi_bin > runs // 20,
+          "the random sample really does overflow onto extra bins (%d of %d runs)"
+          % (multi_bin, runs))
+    check(multi_shelf > runs // 20,
+          "the random sample really does open extra shelves (%d of %d runs)"
+          % (multi_shelf, runs))
+
+
 def _dxf_pairs(text):
     toks = text.split("\n")
     pairs = []
@@ -602,7 +777,7 @@ def main():
               test_units_and_empty, test_chain_loop, test_edge_ticks,
               test_fit_rotation, test_svg_fiducials_and_labels,
               test_rotate_and_centroid, test_dxf, test_tiling,
-              test_tiling_concave_disjoint, test_one_file_core):
+              test_tiling_concave_disjoint, test_packing, test_one_file_core):
         t()
     print()
     if _failures:

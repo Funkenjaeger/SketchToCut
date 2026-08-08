@@ -37,6 +37,7 @@ from .core import fiducials as fidlib
 from .core import fitting as fitlib
 from .core import tiling as tilelib
 from .core import palette as palettelib
+from .core import packing as packlib
 
 
 def _elem_polygon(elem):
@@ -685,8 +686,27 @@ def run_per_region_export(sketch, target_profiles, opts):
     return "\n".join(lines + _tile_note(info, opts))
 
 
+def _sheet_name(base, ext, index, count):
+    """Output filename for sheet ``index`` of ``count``.
+
+    One sheet keeps the plain ``base.ext`` the tool has always written; two or
+    more get ``base-1.ext``, ``base-2.ext``, ... so the common case is
+    unchanged and a multi-sheet job is obvious from the file listing.
+    """
+    if count <= 1:
+        return "%s.%s" % (base, ext)
+    return "%s-%d.%s" % (base, index + 1, ext)
+
+
 def run_one_file_export(sketch, target_profiles, opts):
-    """Pack all pieces into ONE multi-color file (+ ASSEMBLY). Returns a summary."""
+    """Pack all pieces into ONE multi-color file per sheet (+ ASSEMBLY).
+
+    The pieces are packed against the user's bed size by :mod:`core.packing`,
+    which opens another sheet rather than ever arranging past the material --
+    if the individual pieces fit and the packed result does not, that is a
+    packing failure, not something to warn about after the fact. Returns a
+    summary.
+    """
     final, info = _build_final_pieces(sketch, target_profiles, opts)
     if info["error"]:
         return info["error"]
@@ -697,44 +717,46 @@ def run_one_file_export(sketch, target_profiles, opts):
     folder, base = opts["folder"], opts["base"]
     gap = 0.5  # cm between packed pieces
 
-    # Rotate each piece to its fit orientation, then translate it into a single
-    # column (Y) or row (X). Fit already guarantees width <= bedW, height <= bedH.
-    piece_groups, labels = [], []
-    cursor = 0.0
+    # Each piece is rotated to the fit orientation chosen upstream; the packer
+    # places those already-final bounding boxes and never re-rotates them.
+    boxes = []
     for p in final:
         theta, center = p["_theta"], p["centroid"]
         outer_r = geom.rotate_element(p["outer"], theta, center)
         holes_r = [geom.rotate_element(h, theta, center) for h in p["holes"]]
-        minx, miny, maxx, maxy = geom.bounding_box([outer_r] + holes_r)
-        w, h = maxx - minx, maxy - miny
-        if axis == "X":
-            dx, dy = cursor - minx, -miny
-            cursor += w + gap
-        else:  # Y
-            dx, dy = -minx, cursor - miny
-            cursor += h + gap
-        piece_groups.append(_piece_group(p, rotate=True, dx=dx, dy=dy))
-        if opts["label_on_pieces"]:
-            labels.append((p["letter"], (center[0] + dx, center[1] + dy),
-                           _label_height_cm(p["outer"])))
+        boxes.append(geom.bounding_box([outer_r] + holes_r))
 
-    doc, ext = _render_pieces_doc(piece_groups, unit, fmt, sw, filled=True,
-                                  labels=labels or None)
-    with open(os.path.join(folder, "%s.%s" % (base, ext)),
-              "w", encoding="utf-8") as fp:
-        fp.write(doc)
+    bins = packlib.pack(boxes, opts["bed_w_cm"], opts["bed_h_cm"], gap, axis)
+
+    ext = "dxf" if fmt == "dxf" else "svg"
+    written = []
+    for bi, b in enumerate(bins):
+        piece_groups, labels = [], []
+        for pl in b.placements:
+            p = final[pl.index]
+            piece_groups.append(_piece_group(p, rotate=True, dx=pl.dx, dy=pl.dy))
+            if opts["label_on_pieces"]:
+                center = p["centroid"]
+                labels.append((p["letter"],
+                               (center[0] + pl.dx, center[1] + pl.dy),
+                               _label_height_cm(p["outer"])))
+        doc, ext = _render_pieces_doc(piece_groups, unit, fmt, sw, filled=True,
+                                      labels=labels or None)
+        fname = _sheet_name(base, ext, bi, len(bins))
+        with open(os.path.join(folder, fname), "w", encoding="utf-8") as fp:
+            fp.write(doc)
+        written.append(fname)
+
     if len(final) > 1:
         _write_assembly(final, opts, unit, sw, fmt, folder, base)
 
-    all_elems = [e for pg in piece_groups for e in [pg["outer"]] + pg["holes"]]
-    bb = geom.bounding_box(all_elems)
-    scl = geom.cm_to(unit)
-    lines = ["Exported %d piece(s) into %s.%s (arranged along %s)%s:\n%s\n"
-             % (len(final), base, ext, axis,
+    lines = ["Exported %d piece(s) into %d file(s) (packed to the %g x %g %s "
+             "bed, shelves along %s)%s:\n%s\n"
+             % (len(final), len(written), opts["bed_w"], opts["bed_h"],
+                opts["unit"], axis,
                 (" + %s_ASSEMBLY.%s" % (base, ext)) if len(final) > 1 else "",
                 folder)]
-    lines.append("Overall size: %.2f x %.2f %s (must fit your material area)."
-                 % ((bb[2] - bb[0]) * scl, (bb[3] - bb[1]) * scl, unit))
+    lines.append("Files: %s" % ", ".join(written))
     return "\n".join(lines + _tile_note(info, opts))
 
 
@@ -860,10 +882,15 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             units.listItems.add("Inch", True)      # index 0, default
             units.listItems.add("Millimeter", False)
 
+            # Shelf orientation for the one-file packer: pieces run along the
+            # chosen axis within a shelf, and shelves advance across the other
+            # one. (Item indices are persisted in settings.json -- keep them.)
             arrange = inputs.addDropDownCommandInput(
-                "arrangeAxis", "Arrange along (one-file mode)", text_list)
-            arrange.listItems.add("Y (stack down a column)", True)   # index 0
-            arrange.listItems.add("X (stack across a row)", False)   # index 1
+                "arrangeAxis", "Shelf direction (one-file mode)", text_list)
+            arrange.listItems.add(
+                "Y (stack down a column, wrap to the next column)", True)  # 0
+            arrange.listItems.add(
+                "X (stack across a row, wrap to the next row)", False)     # 1
 
             inputs.addFloatSpinnerCommandInput(
                 "strokeWidth", "Stroke width (output units)",
@@ -893,8 +920,10 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 "hint", "",
                 "Both modes: each closed region (selected, else all) is "
                 "auto-rotated to fit the bed; too-big regions are tiled. "
-                "One file = all pieces in one multi-color file, packed along the "
-                "chosen axis (peel each color onto its own vinyl sheet). "
+                "One file = all pieces packed into one multi-color file per "
+                "sheet, in shelves along the chosen axis; anything that will "
+                "not fit the bed spills onto another sheet (base-1, base-2, "
+                "...) instead of running off the material. "
                 "Per region = one file per piece. Both also emit an ASSEMBLY "
                 "reference (filled, colored, letters) showing where each fits. "
                 "SVG for the vinyl cutter, DXF for laser/SendCutSend.", 5, True)

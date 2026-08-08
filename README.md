@@ -14,8 +14,10 @@ quoting is otherwise fiddly. This makes it one click.
 
 * Two export modes over the same pipeline:
   * **One file** — every piece packed into a single file, each a **distinct
-    color** (peel each onto its own vinyl sheet), stacked along a chosen axis
-    (Y default) within the bed width.
+    color** (peel each onto its own vinyl sheet), in shelves along a chosen
+    axis (Y default). The packing is **bounded by your bed size**: pieces that
+    do not fit spill onto another sheet (`base-1.svg`, `base-2.svg`, …) instead
+    of running off the end of the material.
   * **One file per region** — one file per closed sketch region (Fusion
     profile), so you can manually section a part by drawing dividing lines.
 * Both modes emit an **`ASSEMBLY`** reference (filled, colored, lettered) showing
@@ -49,7 +51,9 @@ reference shows how the pieces fit back into the whole panel.
 <img src="docs/example-assembly.svg" width="760" alt="Assembly reference: six colored pieces A-F forming the full panel in their original positions">
 
 **One-file cut layout** — the same pieces auto-tiled and stacked in a
-color-separated column (shown scaled down; true size ≈ 12 × 89 in):
+color-separated column (shown scaled down; true size ≈ 12 × 89 in). That is one
+sheet because the bed was 12 in wide by roll length; on a 12 × 24 in mat the
+same job packs onto numbered sheets instead:
 
 <img src="docs/example-onefile.svg" height="380" alt="One-file output: six colored tiles stacked in a 12-inch column with fiducial ticks and red letters">
 
@@ -143,5 +147,6 @@ cut it, and measure to confirm true 1:1.
   general *are* split — see `clip_polygon_rect`.)
 * Fiducials are not matched across a tiled region's outer boundary with an
   adjacent (non-tiled) region.
-* One-file packing is a single column/row (no 2-D wrap); very many pieces make a
-  long strip — set a long-enough material length in your cutter SW.
+* One-file packing is shelf-based (first-fit-decreasing), not an optimal nest:
+  it never exceeds the bed, but it will leave gaps a smarter nester would fill,
+  and can therefore use one more sheet than strictly necessary.

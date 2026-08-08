@@ -358,6 +358,45 @@ def scenario_one_file():
     check(abs(h - (4 * 4 + 3 * 0.5)) < 1e-6, "pieces stacked, not overlapping")
 
 
+def scenario_one_file_multisheet():
+    """The one-file export must never arrange past the material.
+
+    Six 4x4 pieces cannot share a 10x10 bed, and every piece fits it on its
+    own -- exactly the case the old single-cursor arrangement got wrong, since
+    it stacked all six into one 25.5cm-tall file and merely *printed* that the
+    result had to fit. The packer spills onto a second sheet instead.
+    """
+    print("scenario_one_file_multisheet (pieces that overflow the bed spill "
+          "onto another sheet):")
+    ps = [Profile([Loop(rect_pcs(x, y, x + 4, y + 4), True)])
+          for x, y in ((0, 0), (6, 0), (12, 0), (0, 6), (6, 6), (12, 6))]
+    d = tempfile.mkdtemp()
+    summary = m.run_one_file_export(
+        Sketch(ps), ps,
+        opts(d, "multi", unit="cm", bed_w=10, bed_h=10, bed_w_cm=10,
+             bed_h_cm=10, fid=False))
+    files = sorted(os.listdir(d))
+    check(files == ["multi-1.svg", "multi-2.svg", "multi_ASSEMBLY.svg"],
+          "6 pieces on a 10x10 bed -> 2 numbered sheets + 1 assembly (got %s)"
+          % files)
+    sheets = [f for f in files if not f.endswith("_ASSEMBLY.svg")]
+    over = [(f, _dim(read(d, f), "width"), _dim(read(d, f), "height"))
+            for f in sheets
+            if _dim(read(d, f), "width") > 10 + 1e-6
+            or _dim(read(d, f), "height") > 10 + 1e-6]
+    check(not over, "every sheet fits the 10x10 bed (over: %s)" % (over or "none"))
+    fills = set()
+    for f in sheets:
+        fills |= set(re.findall(r'fill="(#[0-9A-Fa-f]{6})"', read(d, f)))
+    check(len(fills) == 6,
+          "all 6 pieces are present across the sheets, one color each (got %d)"
+          % len(fills))
+    check("2 file(s)" in summary, "summary reports the sheet count (got %r)"
+          % summary.splitlines()[0])
+    check("must fit your material area" not in summary,
+          "the old advisory line is gone -- the bound is structural now")
+
+
 def scenario_one_file_fiducials():
     print("scenario_one_file_fiducials (fiducials in piece color, letters red):")
     left = Profile([Loop([line_pc((0, 0), (5, 0)), line_pc((5, 0), (5, 4)),
@@ -460,6 +499,7 @@ def main():
     scenario_minsize()
     scenario_fiducial_drop()
     scenario_one_file()
+    scenario_one_file_multisheet()
     scenario_one_file_fiducials()
     scenario_dxf()
     scenario_dxf_fiducial_layer()
