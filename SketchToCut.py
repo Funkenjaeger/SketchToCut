@@ -92,6 +92,11 @@ def _tile_to_piece(tile, opts):
             fids.extend(fidlib.edge_ticks(
                 seg, centroid, length=opts["fid_len_cm"],
                 spacing=opts["fid_spacing_cm"], inset=opts["fid_inset_cm"]))
+        # Poster-overlap crop marks (only present when overlap > 0) render on the
+        # fiducial layer/color like the ticks; both adjacent tiles carry the same
+        # marks on the shared grid line, so lining them up registers the sheets.
+        for a, b in tile.get("crop_marks", []):
+            fids.append(geom.Line(a, b))
     return {"outer": outer, "holes": holes, "cloud": list(tile["outer"]),
             "centroid": centroid, "fiducials": fids, "_theta": 0.0}
 
@@ -584,6 +589,7 @@ def _build_final_pieces(sketch, target_profiles, opts):
     wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
     tile_rot = opts.get("tile_rotation_deg", 0.0)
     tile_min = opts.get("tile_min_size_cm", 0.0)
+    tile_overlap = opts.get("tile_overlap_cm", 0.0)   # 0 -> butt-joint (default)
 
     final, untileable, n_tiled = [], [], 0
     for p in survivors:
@@ -594,7 +600,7 @@ def _build_final_pieces(sketch, target_profiles, opts):
             continue
         tiles = tilelib.tile_piece(
             _elem_polygon(p["outer"]), [_elem_polygon(h) for h in p["holes"]],
-            wc, hc, tile_rot, tile_min)
+            wc, hc, tile_rot, tile_min, overlap=tile_overlap)
         pieces = [q for q in (_tile_to_piece(t, opts) for t in tiles) if q]
         if pieces:
             n_tiled += 1

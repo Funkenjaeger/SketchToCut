@@ -140,7 +140,10 @@ cut it, and measure to confirm true 1:1.
 
 ## Roadmap / limitations
 
-* Tiling is butt-joint only (no configurable overlap yet).
+* Tiling is butt-joint by default; an optional `overlap` gives poster-style
+  tiles that share a margin, with crop marks on the grid lines for alignment
+  (crop marks are grid-based, so on a concave clip one can fall outside the
+  actual cut shape).
 * A tile-boundary line that lands exactly on the floor of a notch leaves the
   two regions either side of the notch joined by a zero-width run along that
   line, rather than split into two pieces. (Disjoint tile-intersections in

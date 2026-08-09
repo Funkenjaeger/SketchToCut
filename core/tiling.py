@@ -15,7 +15,8 @@ frame, tiled axis-aligned, and the results rotated back. At 0 deg the tile
 dimensions are honoured verbatim.
 
 Limitations (documented, acceptable for the manual-sectioning-first workflow):
-  * Butt-joint tiles only (no overlap yet).
+  * Tiles are butt-joint by default (``overlap=0``); pass ``overlap`` for a
+    poster-style shared margin with crop marks (see :func:`tile_piece`).
   * Self-intersecting input polygons are out of scope; the clip assumes each
     input ring is simple.
   * Two regions that meet *only* along a zero-width stretch of the tile edge --
@@ -336,6 +337,37 @@ def _seam_edges(ring, i, j, ncols, nrows, rx0, rx1, ry0, ry1):
     return out
 
 
+def _crop_marks(i, j, ncols, nrows, gx0, gx1, gy0, gy1, crop_len):
+    """Short trim guides on the *nominal* grid lines a tile straddles.
+
+    With ``overlap > 0`` a tile's cut rectangle is grown past the grid line, so
+    there is no butt seam to place matched ticks on. Instead each interior grid
+    line the cell borders gets two short marks lying *on that line* (one at each
+    end of the cell), pointing along it. Both tiles that share the line carry the
+    same two marks at the same coordinates, so overlaying the two prints and
+    lining the marks up registers the overlap; trimming along a mark yields a
+    clean butt join. ``crop_len`` is clamped so a mark never exceeds half its
+    grid line's span. Marks are grid-based: on a concave clip one can fall
+    outside the actual cut shape (documented, acceptable for the poster case).
+    """
+    marks = []
+    lx = min(crop_len, 0.5 * (gy1 - gy0))     # along-Y marks for vertical lines
+    ly = min(crop_len, 0.5 * (gx1 - gx0))     # along-X marks for horizontal lines
+    if i > 0 and lx > 0:                       # left grid line x == gx0
+        marks.append(((gx0, gy0), (gx0, gy0 + lx)))
+        marks.append(((gx0, gy1), (gx0, gy1 - lx)))
+    if i < ncols - 1 and lx > 0:               # right grid line x == gx1
+        marks.append(((gx1, gy0), (gx1, gy0 + lx)))
+        marks.append(((gx1, gy1), (gx1, gy1 - lx)))
+    if j > 0 and ly > 0:                       # bottom grid line y == gy0
+        marks.append(((gx0, gy0), (gx0 + ly, gy0)))
+        marks.append(((gx1, gy0), (gx1 - ly, gy0)))
+    if j < nrows - 1 and ly > 0:               # top grid line y == gy1
+        marks.append(((gx0, gy1), (gx0 + ly, gy1)))
+        marks.append(((gx1, gy1), (gx1 - ly, gy1)))
+    return marks
+
+
 def hole_cut_paths(ring, seam_edges, tol=_TOL):
     """Split a clipped hole ``ring`` into the paths that should actually be cut.
 
@@ -422,16 +454,30 @@ def _holes_of(loop, all_loops, hole_loops):
     return mine
 
 
-def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0, min_size=0.0):
+def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0, min_size=0.0,
+               overlap=0.0, crop_len=0.6):
     """Split a piece into bed-sized tiles.
 
     ``outer`` is the piece's closed outer polygon (cm); ``holes`` a list of
     closed hole polygons. Returns a list of tile dicts::
 
         {"outer": [...], "holes": [[...], ...], "cut_edges": [(a, b), ...],
-         "hole_seam_edges": [[(a, b), ...], ...], "row": j, "col": i}
+         "hole_seam_edges": [[(a, b), ...], ...], "crop_marks": [(a, b), ...],
+         "row": j, "col": i}
 
     with all coordinates back in the original frame.
+
+    ``overlap`` (cm, default ``0`` -> exact butt-joint, output unchanged) grows
+    every tile past each *interior* grid line by ``overlap / 2`` on that side, so
+    two adjacent tiles share a margin ``overlap`` wide (poster-style). The grid
+    itself is laid out on ``tile_w - overlap`` x ``tile_h - overlap`` cells so a
+    grown tile still fits ``tile_w`` x ``tile_h`` (a tile never exceeds the bed).
+    An overlapped tile carries ``crop_marks`` (short trim guides on the nominal
+    grid lines, see :func:`_crop_marks`) *instead* of ``cut_edges`` -- there is
+    no shared butt seam to match ticks on -- and its ``cut_edges`` /
+    ``hole_seam_edges`` come back empty. With ``overlap == 0`` ``crop_marks`` is
+    empty and ``cut_edges`` / ``hole_seam_edges`` behave exactly as before.
+    ``crop_len`` is the length of each crop mark (clamped to half its line span).
 
     One grid cell can yield **more than one** tile dict: a concave piece can
     meet a single tile rectangle in several disjoint regions, and those are
@@ -454,6 +500,13 @@ def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0, min_size=0.0):
     boundary shared between two closed loops (SVG/DXF here have no notion of
     "open" cut path), which is a follow-up design choice.
     """
+    if overlap < 0.0:
+        raise ValueError("overlap must be >= 0 (got %r)" % (overlap,))
+    if overlap >= tile_w or overlap >= tile_h:
+        raise ValueError("overlap %r must be smaller than the tile (%r x %r)"
+                         % (overlap, tile_w, tile_h))
+    half_ov = 0.5 * overlap
+
     rot = math.radians(rotation_deg)
     o = _rot(outer, -rot)
     hs = [_rot(h, -rot) for h in holes]
@@ -462,37 +515,56 @@ def tile_piece(outer, holes, tile_w, tile_h, rotation_deg=0.0, min_size=0.0):
     ys = [p[1] for p in o]
     minx, maxx = min(xs), max(xs)
     miny, maxy = min(ys), max(ys)
-    xb = _partition(minx, maxx, tile_w, min_size)
-    yb = _partition(miny, maxy, tile_h, min_size)
+    # Lay the grid on cells shrunk by the overlap so a grown tile still fits the
+    # bed; at overlap == 0 this is the original full-size partition.
+    xb = _partition(minx, maxx, tile_w - overlap, min_size)
+    yb = _partition(miny, maxy, tile_h - overlap, min_size)
     ncols = len(xb) - 1
     nrows = len(yb) - 1
 
     tiles = []
     for j in range(nrows):
-        ry0, ry1 = yb[j], yb[j + 1]
+        gy0, gy1 = yb[j], yb[j + 1]                      # nominal cell (grid)
+        cy0 = gy0 - (half_ov if j > 0 else 0.0)          # grown clip rect
+        cy1 = gy1 + (half_ov if j < nrows - 1 else 0.0)
         for i in range(ncols):
-            rx0, rx1 = xb[i], xb[i + 1]
-            outers = clip_polygon_rect(o, rx0, ry0, rx1, ry1)
+            gx0, gx1 = xb[i], xb[i + 1]
+            cx0 = gx0 - (half_ov if i > 0 else 0.0)
+            cx1 = gx1 + (half_ov if i < ncols - 1 else 0.0)
+            outers = clip_polygon_rect(o, cx0, cy0, cx1, cy1)
             if not outers:
                 continue
             hole_loops = []
             for h in hs:
-                hole_loops.extend(clip_polygon_rect(h, rx0, ry0, rx1, ry1))
+                hole_loops.extend(clip_polygon_rect(h, cx0, cy0, cx1, cy1))
 
             def _back(edges):
                 return [(_rot([a], rot)[0], _rot([b], rot)[0]) for a, b in edges]
 
+            crops = _back(_crop_marks(i, j, ncols, nrows,
+                                      gx0, gx1, gy0, gy1, crop_len)) \
+                if overlap > 0.0 else []
+
             for co in outers:
                 chs = _holes_of(co, outers, hole_loops)
-                hole_seams = [
-                    _seam_edges(ch, i, j, ncols, nrows, rx0, rx1, ry0, ry1)
-                    for ch in chs]
-                cut = _seam_edges(co, i, j, ncols, nrows, rx0, rx1, ry0, ry1)
+                # Butt-joint seams (and their doubled-hole cuts) only make sense
+                # when tiles meet exactly on the grid line; with an overlap the
+                # crop marks take over and there are no shared seam edges.
+                if overlap > 0.0:
+                    cut = []
+                    hole_seams = [[] for _ in chs]
+                else:
+                    cut = _seam_edges(co, i, j, ncols, nrows,
+                                      gx0, gx1, gy0, gy1)
+                    hole_seams = [
+                        _seam_edges(ch, i, j, ncols, nrows, gx0, gx1, gy0, gy1)
+                        for ch in chs]
                 tiles.append({
                     "outer": _rot(co, rot),
                     "holes": [_rot(ch, rot) for ch in chs],
                     "cut_edges": _back(cut),
                     "hole_seam_edges": [_back(hseam) for hseam in hole_seams],
+                    "crop_marks": crops,
                     "row": j, "col": i,
                 })
     return tiles

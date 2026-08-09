@@ -515,6 +515,82 @@ def test_tiling_concave_disjoint():
     check(okhole, "each hole sits inside the tile it was assigned to")
 
 
+def test_tiling_overlap():
+    print("test_tiling_overlap (item 1: poster overlap + crop marks):")
+    big = [(0, 0), (30, 0), (30, 30), (0, 30)]
+
+    # overlap == 0 must reproduce today's butt-joint output exactly: no crop
+    # marks, seam cut_edges still present, still 6 tiles.
+    base = tiling.tile_piece(big, [], 12, 24)
+    zero = tiling.tile_piece(big, [], 12, 24, overlap=0.0)
+    check(all(t["crop_marks"] == [] for t in zero),
+          "overlap=0 emits no crop marks")
+    check(any(t["cut_edges"] for t in zero),
+          "overlap=0 still reports butt-joint cut_edges")
+    check([t["outer"] for t in base] == [t["outer"] for t in zero],
+          "overlap=0 tile geometry is byte-identical to the default call")
+
+    # 20x10 piece, 10x10 tiles, 2cm overlap: grid on 8x8 cells -> 3x2 tiles.
+    piece = [(0, 0), (20, 0), (20, 10), (0, 10)]
+    ov = 2.0
+    tiles = tiling.tile_piece(piece, [], tile_w=10, tile_h=10, overlap=ov)
+
+    # No grown tile exceeds the bed, and each carries crop marks not cut_edges.
+    okfit = True
+    for t in tiles:
+        tx = [p[0] for p in t["outer"]]
+        ty = [p[1] for p in t["outer"]]
+        if (max(tx) - min(tx)) > 10 + 1e-6 or (max(ty) - min(ty)) > 10 + 1e-6:
+            okfit = False
+    check(okfit, "every overlapped tile still fits within 10x10")
+    check(all(t["cut_edges"] == [] for t in tiles),
+          "overlapped tiles report no butt-joint cut_edges")
+    check(all(all(hs == [] for hs in t["hole_seam_edges"]) for t in tiles),
+          "overlapped tiles report no hole seam edges")
+    check(all(t["crop_marks"] for t in tiles),
+          "every overlapped tile carries crop marks")
+
+    # The overlap really doubles material along the seams: covered area exceeds
+    # the piece area (butt-joint would equal it exactly).
+    check(sum(_area(t["outer"]) for t in tiles) > _area(piece) + 1e-6,
+          "overlapped tiles cover MORE than the piece area (got %.2f vs %.2f)"
+          % (sum(_area(t["outer"]) for t in tiles), _area(piece)))
+
+    # Two horizontally-adjacent tiles share a margin exactly `overlap` wide.
+    row0 = sorted([t for t in tiles if t["row"] == 0], key=lambda t: t["col"])
+    left, right = row0[0], row0[1]
+    lxmax = max(p[0] for p in left["outer"])
+    rxmin = min(p[0] for p in right["outer"])
+    check(approx(lxmax - rxmin, ov),
+          "adjacent tiles overlap by exactly %.1fcm in x (got %.4f)"
+          % (ov, lxmax - rxmin))
+
+    # Crop marks lie on the nominal grid line x=8, and the two tiles sharing
+    # that seam carry the SAME marks -> overlaying and lining them up registers
+    # the sheets.
+    def marks_on_x(t, xval):
+        return {tuple(round(c, 6) for c in a) + tuple(round(c, 6) for c in b)
+                for a, b in t["crop_marks"]
+                if approx(a[0], xval) and approx(b[0], xval)}
+    lm = marks_on_x(left, 8.0)
+    rm = marks_on_x(right, 8.0)
+    check(len(lm) == 2 and lm == rm,
+          "both tiles carry identical crop marks on the shared grid line x=8 "
+          "(left=%s right=%s)" % (sorted(lm), sorted(rm)))
+    # A crop mark is a short segment; here length == crop_len default 0.6.
+    for a, b in left["crop_marks"]:
+        check(approx(math.hypot(b[0] - a[0], b[1] - a[1]), 0.6),
+              "crop mark length is crop_len (0.6)")
+        break
+
+    # An overlap as big as the tile is a degenerate request and is rejected.
+    try:
+        tiling.tile_piece(piece, [], 10, 10, overlap=10.0)
+        check(False, "overlap >= tile should raise")
+    except ValueError:
+        check(True, "overlap >= tile size raises ValueError")
+
+
 def test_one_file_core():
     print("test_one_file_core (translate, palette, render_groups):")
     t = g.translate_element(g.Line((0, 0), (1, 1)), 5, 3)
@@ -777,7 +853,8 @@ def main():
               test_units_and_empty, test_chain_loop, test_edge_ticks,
               test_fit_rotation, test_svg_fiducials_and_labels,
               test_rotate_and_centroid, test_dxf, test_tiling,
-              test_tiling_concave_disjoint, test_packing, test_one_file_core):
+              test_tiling_concave_disjoint, test_tiling_overlap,
+              test_packing, test_one_file_core):
         t()
     print()
     if _failures:
