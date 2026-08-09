@@ -200,6 +200,60 @@ def test_edge_ticks():
           "interior below -> ticks point -y")
 
 
+def test_shared_edge_ticks():
+    print("test_shared_edge_ticks (item 3: tiled boundary <-> adjacent region):")
+    # A region to the RIGHT of the divider x=0 is auto-tiled into two tiles,
+    # split at y=10; the region to the LEFT is a single (non-tiled) neighbour.
+    edge = [(0, 0), (0, 20)]                 # the shared vertical boundary
+    neigh_ticks = fiducials.edge_ticks(edge, toward=(-5, 10), length=0.6,
+                                       spacing=5.0, inset=0.3)
+    ringA = [(0, 0), (5, 0), (5, 10), (0, 10)]     # lower tile
+    ringB = [(0, 10), (5, 10), (5, 20), (0, 20)]   # upper tile
+    a = fiducials.shared_edge_ticks(edge, ringA, toward=(2.5, 5), length=0.6,
+                                    spacing=5.0, inset=0.3)
+    b = fiducials.shared_edge_ticks(edge, ringB, toward=(2.5, 15), length=0.6,
+                                    spacing=5.0, inset=0.3)
+
+    check(len(a) > 0 and len(b) > 0,
+          "each boundary tile gets some matched ticks (got %d, %d)"
+          % (len(a), len(b)))
+    check(len(a) == 2 and len(b) == 3,
+          "the 5 seam ticks split 2 (lower tile) / 3 (upper tile), got %d/%d"
+          % (len(a), len(b)))
+    check(len(a) + len(b) == len(neigh_ticks),
+          "tiled side emits exactly as many ticks as the neighbour (%d vs %d)"
+          % (len(a) + len(b), len(neigh_ticks)))
+
+    def bases(ticks):
+        return {(round(t.p0[0], 6), round(t.p0[1], 6)) for t in ticks}
+
+    # THE MATCH: the tiled side's base points, taken together, are exactly the
+    # neighbour's -- every neighbour half-tick has a partner, none is invented.
+    check(bases(a) | bases(b) == bases(neigh_ticks),
+          "tiled tiles' base points reunite into the neighbour's set")
+    check(bases(a).isdisjoint(bases(b)),
+          "the split is clean: no base point is claimed by both tiles")
+    check(bases(a) <= bases(neigh_ticks) and bases(b) <= bases(neigh_ticks),
+          "no tile invents a tick off the shared edge")
+
+    # Each tiled tick sits on its own tile boundary and points INTO that tile
+    # (+x), i.e. opposite the neighbour's (-x), so the halves meet at the seam.
+    okA = True
+    for t in a:
+        if not (approx(t.p0[0], 0.0) and t.p1[0] > t.p0[0]
+                and approx(t.p1[1], t.p0[1])
+                and approx(math.hypot(t.p1[0] - t.p0[0], t.p1[1] - t.p0[1]), 0.3)):
+            okA = False
+    check(okA, "tile ticks are perpendicular, interior-pointing, length/2 long")
+    check(all(t.p1[0] < t.p0[0] for t in neigh_ticks),
+          "the neighbour's matching ticks point the other way (-x)")
+
+    # A tile whose boundary never touches the shared edge gets nothing.
+    far = [(6, 0), (10, 0), (10, 20), (6, 20)]
+    check(fiducials.shared_edge_ticks(edge, far, toward=(8, 10)) == [],
+          "a tile off the shared edge gets no matched ticks")
+
+
 def test_fit_rotation():
     print("test_fit_rotation (auto-rotate to fit a bed):")
     # 18 x 6 piece vs a 12 x 24 bed: does NOT fit at 0 (18>12) but fits at 90.
@@ -851,7 +905,8 @@ def main():
     for t in (test_square_mm, test_inch_scaling, test_bbox_translate_margin,
               test_circle, test_arc_sweep_flag, test_ellipse_extents,
               test_units_and_empty, test_chain_loop, test_edge_ticks,
-              test_fit_rotation, test_svg_fiducials_and_labels,
+              test_shared_edge_ticks, test_fit_rotation,
+              test_svg_fiducials_and_labels,
               test_rotate_and_centroid, test_dxf, test_tiling,
               test_tiling_concave_disjoint, test_tiling_overlap,
               test_packing, test_one_file_core):

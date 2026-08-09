@@ -148,8 +148,6 @@ cut it, and measure to confirm true 1:1.
   two regions either side of the notch joined by a zero-width run along that
   line, rather than split into two pieces. (Disjoint tile-intersections in
   general *are* split — see `clip_polygon_rect`.)
-* Fiducials are not matched across a tiled region's outer boundary with an
-  adjacent (non-tiled) region.
 * One-file packing is shelf-based (first-fit-decreasing), not an optimal nest:
   it never exceeds the bed, but it will leave gaps a smarter nester would fill,
   and can therefore use one more sheet than strictly necessary.

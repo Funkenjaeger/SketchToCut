@@ -602,6 +602,24 @@ def _build_final_pieces(sketch, target_profiles, opts):
             _elem_polygon(p["outer"]), [_elem_polygon(h) for h in p["holes"]],
             wc, hc, tile_rot, tile_min, overlap=tile_overlap)
         pieces = [q for q in (_tile_to_piece(t, opts) for t in tiles) if q]
+        # Item 3: where this tiled region's OUTER boundary is shared with an
+        # adjacent region, drop matched ticks on the tiles that abut it. The
+        # neighbour's half was already placed from the same edge polyline
+        # (key_points[k]) in the fiducial pass above, so the base points coincide
+        # and pair up in _drop_unfitting_fiducials. (Skipped under overlap: there
+        # the crop marks register the sheets and there is no butt seam.)
+        if opts["fid_enabled"] and tile_overlap == 0.0:
+            for k in p["outer_keys"]:
+                if len(key_to_pieces.get(k, ())) < 2:
+                    continue                      # not shared with another region
+                epts = key_points.get(k)
+                if not epts:
+                    continue
+                for q in pieces:
+                    q["fiducials"].extend(fidlib.shared_edge_ticks(
+                        epts, list(q["outer"].points), q["centroid"],
+                        length=opts["fid_len_cm"], spacing=opts["fid_spacing_cm"],
+                        inset=opts["fid_inset_cm"]))
         if pieces:
             n_tiled += 1
             final.extend(pieces)
