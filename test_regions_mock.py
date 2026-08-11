@@ -175,12 +175,12 @@ def attr(text, name):
 
 
 def opts(folder, base, unit="mm", bed_w=6.0, bed_h=6.0, bed_w_cm=6.0,
-         bed_h_cm=6.0, fid=True, labels=False, fmt="svg"):
+         bed_h_cm=6.0, fid=True, labels=False, fmt="svg", filled=True):
     return {"unit": unit, "stroke_width": 0.01, "fmt": fmt,
             "bed_w": bed_w, "bed_h": bed_h,
             "bed_w_cm": bed_w_cm, "bed_h_cm": bed_h_cm, "fid_enabled": fid,
             "fid_len_cm": 0.6, "fid_spacing_cm": 5.0, "fid_inset_cm": 0.3,
-            "fid_color": "red", "label_on_pieces": labels,
+            "fid_color": "red", "label_on_pieces": labels, "filled": filled,
             "folder": folder, "base": base}
 
 
@@ -491,6 +491,76 @@ def scenario_dxf_fiducial_layer():
           "every CUT dxf carries its own ticks (empty: %s)" % (empty or "none"))
 
 
+def cut_outline_is_stroked(text):
+    """True iff a piece's CUT OUTLINE (not just its ticks) is stroked.
+
+    ``'fill="none" stroke="#..."'`` alone proves nothing: filled mode emits
+    exactly that group for a piece's fiducial ticks. The discriminator is what
+    is INSIDE the group -- ticks are open lines, whereas a cut outline is a
+    closed path (``Z``). A mutation test caught the weaker form passing against
+    the very bug it was written to detect.
+    """
+    for chunk in text.split('<g fill="none" stroke="#')[1:]:
+        if "Z" in chunk.split("</g>")[0]:
+            return True
+    return False
+
+
+def scenario_stroked():
+    """opts["filled"]=False must reach the SVG, through the real export path.
+
+    The unit test covers render_pieces itself; this covers the WIRING -- every
+    call site used to hardcode filled=True, so the un-filled renderer was
+    complete but unreachable. Drives both export modes so neither regresses.
+    """
+    print("scenario_stroked (opts filled=False -> stroked cut files):")
+    left = Profile([Loop([line_pc((0, 0), (5, 0)), line_pc((5, 0), (5, 4)),
+                          line_pc((5, 4), (0, 4)), line_pc((0, 4), (0, 0))], True)])
+    right = Profile([Loop([line_pc((5, 0), (10, 0)), line_pc((10, 0), (10, 4)),
+                           line_pc((10, 4), (5, 4)), line_pc((5, 4), (5, 0))], True)])
+
+    d = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([left, right]), [left, right],
+                            opts(d, "stroked", unit="cm", bed_w=24, bed_h=24,
+                                 bed_w_cm=24, bed_h_cm=24, filled=False))
+    a = read(d, "stroked_A.svg")
+    check(cut_outline_is_stroked(a),
+          "per-region piece's cut outline is inside a stroked group")
+    check('stroke="none"' not in a and 'fill-rule="evenodd"' not in a,
+          "per-region piece carries no fill-mode markers")
+    check('fill="#' not in a, "no piece color is painted as a fill")
+
+    # The ASSEMBLY is a human-readable map, not a cut file: it stays filled
+    # on purpose even when the cut files are stroked.
+    assembly = read(d, "stroked_ASSEMBLY.svg")
+    check('fill="#' in assembly and 'stroke="none"' in assembly,
+          "ASSEMBLY stays filled (it is a reference, never cut)")
+
+    # Same geometry with the default opts must still come out filled --
+    # proves the scenario is reading the flag, not just describing the tool.
+    d2 = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([left, right]), [left, right],
+                            opts(d2, "ctl", unit="cm", bed_w=24, bed_h=24,
+                                 bed_w_cm=24, bed_h_cm=24))
+    ctl = read(d2, "ctl_A.svg")
+    check('fill="#' in ctl and 'stroke="none"' in ctl,
+          "the default (filled) control case is unchanged")
+    check(not cut_outline_is_stroked(ctl),
+          "and the stroked-outline probe reads FALSE on it (the probe "
+          "discriminates rather than always passing)")
+
+    # One-file mode threads the same flag through a different call site.
+    d3 = tempfile.mkdtemp()
+    m.run_one_file_export(Sketch([left, right]), [left, right],
+                          opts(d3, "onestroke", unit="cm", bed_w=24, bed_h=24,
+                               bed_w_cm=24, bed_h_cm=24, filled=False))
+    one = read(d3, "onestroke.svg")
+    check(cut_outline_is_stroked(one),
+          "one-file output's cut outline is stroked too")
+    check('stroke="none"' not in one and 'fill-rule="evenodd"' not in one,
+          "one-file output carries no fill-mode markers")
+
+
 def main():
     scenario_split()
     scenario_hole()
@@ -504,6 +574,7 @@ def main():
     scenario_dxf()
     scenario_dxf_fiducial_layer()
     scenario_trim()
+    scenario_stroked()
     print()
     if _fail:
         print("%d FAILURE(S)" % len(_fail))

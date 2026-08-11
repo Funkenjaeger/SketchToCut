@@ -680,6 +680,55 @@ def test_one_file_core():
           "hole -> even-odd compound path (outer + hole subpaths)")
 
 
+def test_render_pieces_stroked():
+    """``filled=False`` must produce genuinely stroked outlines.
+
+    This is the vinyl-cutter path: a cutter that follows contour lines needs
+    real strokes, not filled artwork. Asserting on the actual SVG paint
+    attributes, because "it rendered without raising" would pass just as well
+    against the filled output.
+    """
+    print("test_render_pieces_stroked (filled=False -> vinyl-cutter outlines):")
+    pieces = [
+        {"outer": g.Polyline([(0, 0), (1, 0), (1, 1), (0, 1)], closed=True),
+         "holes": [], "fiducials": [g.Line((0.2, 0.5), (0.8, 0.5))],
+         "color": "#AA0088"},
+        {"outer": g.Polyline([(2, 0), (3, 0), (3, 1), (2, 1)], closed=True),
+         "holes": [], "fiducials": [], "color": "#0088AA"},
+    ]
+    out = svg.render_pieces(pieces, unit="mm", filled=False)
+
+    # The piece color must paint the STROKE, and nothing may be filled with it.
+    check('stroke="#AA0088"' in out and 'stroke="#0088AA"' in out,
+          "both piece colors are used as stroke")
+    check('fill="#AA0088"' not in out and 'fill="#0088AA"' not in out,
+          "no piece color is used as a fill")
+    check(out.count('fill="none"') == 2, "each piece is a fill=none group")
+    # `stroke="none"` and the even-odd rule are the fingerprints of fill mode;
+    # neither may survive here.
+    check('stroke="none"' not in out, "nothing is stroke=none (that is fill mode)")
+    check('fill-rule="evenodd"' not in out,
+          "no even-odd compound path in stroked mode")
+    check('stroke-width="0.01"' in out, "the stroke carries a real width")
+
+    # Same geometry both ways must differ -- guards against `filled` being
+    # accepted and then ignored, which is exactly how the flag could regress.
+    filled_out = svg.render_pieces(pieces, unit="mm", filled=True)
+    check(out != filled_out, "filled=False actually changes the output")
+    check('stroke="none"' in filled_out and 'fill="#AA0088"' in filled_out,
+          "the filled control case is still filled")
+
+    # A hole must be its own stroked subpath, not merged into a fill mask:
+    # the cutter has to physically cut the hole boundary.
+    holed = svg.render_pieces([{
+        "outer": g.Polyline([(0, 0), (4, 0), (4, 4), (0, 4)], closed=True),
+        "holes": [g.Circle((2, 2), 1)], "fiducials": [], "color": "#123456"}],
+        unit="mm", filled=False)
+    check('fill="none" stroke="#123456"' in holed, "holed piece is stroked")
+    check("<circle" in holed and 'fill-rule' not in holed,
+          "the hole is its own stroked circle, not a fill mask")
+
+
 def _rects(boxes, bins):
     """The placed rectangle of every piece, per bin, in bin coordinates."""
     out = []
@@ -909,7 +958,7 @@ def main():
               test_svg_fiducials_and_labels,
               test_rotate_and_centroid, test_dxf, test_tiling,
               test_tiling_concave_disjoint, test_tiling_overlap,
-              test_packing, test_one_file_core):
+              test_packing, test_one_file_core, test_render_pieces_stroked):
         t()
     print()
     if _failures:

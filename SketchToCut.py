@@ -124,9 +124,14 @@ def _render_pieces_doc(piece_groups, unit, fmt, stroke_width, filled=True,
                        labels=None):
     """Render piece groups to the chosen format; returns (text, extension).
 
-    SVG uses filled shapes with per-piece color, fiducials stroked in that
-    same color (so they cut together on a vinyl cutter that separates by
-    color) -- fiducials stay embedded per-piece for that format.
+    SVG defaults to filled shapes with per-piece color, fiducials stroked in
+    that same color (so they cut together on a vinyl cutter that separates by
+    color) -- fiducials stay embedded per-piece for that format. With
+    ``filled=False`` (the dialog's "Fill shapes" unchecked) every outline is
+    stroked in the piece color instead, which is what a cutter driven off
+    contour lines rather than filled artwork expects.
+
+    ``filled`` is SVG-only: DXF is wireframe by nature and ignores it.
 
     DXF stays wireframe (laser cuts paths, not fills) with each piece's cut
     geometry on its own layer/color, but fiducial ticks go on the shared
@@ -666,6 +671,11 @@ def _write_assembly(final, opts, unit, sw, fmt, folder, base):
 
     Uses each piece's palette color (matching the cut files) so you can map a
     color back to where it belongs. No fiducials (they'd vanish on the fills).
+
+    Stays filled even when the cut files are stroked (``opts["filled"]`` is
+    False): this is a human-readable map, never fed to the machine, and solid
+    color blocks are what make the piece-to-position mapping readable at a
+    glance. Only the cut files follow the dialog's fill setting.
     """
     apgs = [_piece_group(p, rotate=False, with_fiducials=False) for p in final]
     labels = [(p["letter"], p["centroid"], _label_height_cm(p["outer"]))
@@ -684,6 +694,7 @@ def run_per_region_export(sketch, target_profiles, opts):
 
     unit, sw = opts["unit"], opts["stroke_width"]
     fmt = opts.get("fmt", "svg")
+    filled = opts.get("filled", True)
     folder, base = opts["folder"], opts["base"]
     single = len(final) == 1
 
@@ -692,7 +703,8 @@ def run_per_region_export(sketch, target_profiles, opts):
         pg = _piece_group(p, rotate=True)
         lbls = ([(p["letter"], p["centroid"], _label_height_cm(p["outer"]))]
                 if opts["label_on_pieces"] and not single else None)
-        doc, ext = _render_pieces_doc([pg], unit, fmt, sw, filled=True, labels=lbls)
+        doc, ext = _render_pieces_doc([pg], unit, fmt, sw, filled=filled,
+                                      labels=lbls)
         fname = "%s.%s" % (base, ext) if single \
             else "%s_%s.%s" % (base, p["letter"], ext)
         with open(os.path.join(folder, fname), "w", encoding="utf-8") as fp:
@@ -737,6 +749,7 @@ def run_one_file_export(sketch, target_profiles, opts):
 
     unit, sw = opts["unit"], opts["stroke_width"]
     fmt = opts.get("fmt", "svg")
+    filled = opts.get("filled", True)
     axis = opts.get("arrange_axis", "Y")
     folder, base = opts["folder"], opts["base"]
     gap = 0.5  # cm between packed pieces
@@ -764,7 +777,7 @@ def run_one_file_export(sketch, target_profiles, opts):
                 labels.append((p["letter"],
                                (center[0] + pl.dx, center[1] + pl.dy),
                                _label_height_cm(p["outer"])))
-        doc, ext = _render_pieces_doc(piece_groups, unit, fmt, sw, filled=True,
+        doc, ext = _render_pieces_doc(piece_groups, unit, fmt, sw, filled=filled,
                                       labels=labels or None)
         fname = _sheet_name(base, ext, bi, len(bins))
         with open(os.path.join(folder, fname), "w", encoding="utf-8") as fp:
@@ -853,6 +866,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             "fid_spacing_cm": inputs.itemById("fidSpacing").value / 10.0,
             "fid_inset_cm": 0.3,
             "fid_color": "red",
+            "filled": inputs.itemById("fillShapes").value,
             "label_on_pieces": inputs.itemById("labelPieces").value,
             "tile_rotation_deg": inputs.itemById("tileRotation").value,
             "tile_min_size_cm": inputs.itemById("tileMinSize").value / s,
@@ -919,6 +933,16 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             inputs.addFloatSpinnerCommandInput(
                 "strokeWidth", "Stroke width (output units)",
                 "", 0.0, 10.0, 0.005, 0.01)
+
+            # Filled vs stroked cut files (SVG only -- DXF is always wireframe).
+            # Checked keeps the long-standing filled output; unchecked emits
+            # stroked outlines, which is what a vinyl cutter's contour-cut
+            # wants. Deliberately positive-sense so the value maps straight to
+            # render_pieces(filled=...) with no negation anywhere in between.
+            inputs.addBoolValueInput(
+                "fillShapes",
+                "Fill shapes -- SVG only (uncheck for stroked outlines, "
+                "e.g. vinyl cutter)", True, "", True)
 
             grp = inputs.addGroupCommandInput("perRegion", "Bed / fiducials / tiling")
             grp.isExpanded = True

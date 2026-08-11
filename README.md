@@ -25,6 +25,11 @@ quoting is otherwise fiddly. This makes it one click.
   piece a distinct color, with fiducials in the same color so they cut together;
   red is reserved for the piece letters.
 * **SVG** (vinyl) or **DXF** (R12, laser/SendCutSend) output.
+* **Fill shapes** (SVG only, on by default) — uncheck it to emit **stroked
+  outlines** in the piece color instead of filled artwork, for a cutter driven
+  off contour lines rather than fills. Holes become their own stroked contours
+  rather than an even-odd mask. The `ASSEMBLY` reference stays filled either
+  way: it is a map to read, not a file to cut.
 * Holes preserved; a bolt-hole disc is not emitted as a spurious piece.
 * Each piece **auto-rotated** to fit a user **max bed size**; regions too big to
   fit at any rotation are **auto-tiled** into bed-sized tiles, with a **min tile
