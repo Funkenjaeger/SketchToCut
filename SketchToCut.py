@@ -613,6 +613,18 @@ def _build_final_pieces(sketch, target_profiles, opts):
         # (key_points[k]) in the fiducial pass above, so the base points coincide
         # and pair up in _drop_unfitting_fiducials. (Skipped under overlap: there
         # the crop marks register the sheets and there is no butt seam.)
+        #
+        # KNOWN GAP, now reachable: the neighbour's half of that seam is placed
+        # by the unguarded fiducial pass above, which does NOT check overlap. So
+        # with overlap > 0 a NON-tiled region abutting this one keeps its ticks
+        # while these tiles get none, and _drop_unfitting_fiducials will not
+        # remove them -- it only drops a group when a member's tip pokes out, and
+        # a lone tick is a group of one that fits. Measured: 5 ticks vs 0 on a
+        # 20x20 tiled region beside a 4x20 neighbour. Until overlap was wired to
+        # the dialog this was unreachable; it is now one spinner away. Fixing it
+        # means choosing whether the neighbour should also fall back to crop
+        # marks or whether these tiles should keep butt ticks on shared OUTER
+        # edges -- a design call, deliberately not made here.
         if opts["fid_enabled"] and tile_overlap == 0.0:
             for k in p["outer_keys"]:
                 if len(key_to_pieces.get(k, ())) < 2:
@@ -870,6 +882,9 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             "label_on_pieces": inputs.itemById("labelPieces").value,
             "tile_rotation_deg": inputs.itemById("tileRotation").value,
             "tile_min_size_cm": inputs.itemById("tileMinSize").value / s,
+            # `/ s` converts output units -> cm, matching the *_cm key name.
+            # Dropping it would read 0.5 in as 0.5 cm: a silent 2.54x error.
+            "tile_overlap_cm": inputs.itemById("tileOverlap").value / s,
             "arrange_axis": ("X" if inputs.itemById("arrangeAxis").selectedItem.index == 1
                              else "Y"),
             "folder": folder, "base": base,
@@ -963,6 +978,15 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             gi.addFloatSpinnerCommandInput(
                 "tileMinSize", "Min tile size (output units, 0=off)",
                 "", 0.0, 10000.0, 0.5, 0.0)
+            # Poster overlap between tiles. Output units like the bed/min-tile
+            # spinners beside it (NOT mm like the fiducial ones) -- the opts key
+            # is *_cm and the conversion happens there, so the label and the
+            # divisor have to agree. Defaults to 0 = butt joint: that is what
+            # every run has produced until now, and a nonzero default would
+            # silently grow tiles and switch off the matched seam ticks.
+            gi.addFloatSpinnerCommandInput(
+                "tileOverlap", "Tile overlap (output units, 0=butt joint)",
+                "", 0.0, 10000.0, 0.25, 0.0)
 
             inputs.addTextBoxCommandInput(
                 "hint", "",

@@ -41,6 +41,12 @@ quoting is otherwise fiddly. This makes it one click.
   they stay with their piece in the piece's color, so a color-separating vinyl
   cutter cuts them together. The `ASSEMBLY` reference carries no fiducials —
   they would vanish under the filled shapes.
+* **Tile overlap** (output units, default `0` = butt joint). Above zero, adjacent
+  tiles share a margin that wide and carry **crop marks** — short trim guides on
+  the nominal grid line, identical on both tiles, so overlaying the sheets and
+  lining the marks up registers them. Overlapped tiles carry no butt-seam
+  fiducials: there is no shared seam to match ticks on. Crop marks ride the same
+  layer/color as the fiducials, so turning fiducials off suppresses them too.
 * Dialog settings are **remembered** between runs.
 
 ## Example

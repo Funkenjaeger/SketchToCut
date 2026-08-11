@@ -174,13 +174,19 @@ def attr(text, name):
     return mt.group(1) if mt else None
 
 
+def approx(a, b, tol=1e-6):
+    return abs(a - b) <= tol
+
+
 def opts(folder, base, unit="mm", bed_w=6.0, bed_h=6.0, bed_w_cm=6.0,
-         bed_h_cm=6.0, fid=True, labels=False, fmt="svg", filled=True):
+         bed_h_cm=6.0, fid=True, labels=False, fmt="svg", filled=True,
+         overlap_cm=0.0):
     return {"unit": unit, "stroke_width": 0.01, "fmt": fmt,
             "bed_w": bed_w, "bed_h": bed_h,
             "bed_w_cm": bed_w_cm, "bed_h_cm": bed_h_cm, "fid_enabled": fid,
             "fid_len_cm": 0.6, "fid_spacing_cm": 5.0, "fid_inset_cm": 0.3,
             "fid_color": "red", "label_on_pieces": labels, "filled": filled,
+            "tile_overlap_cm": overlap_cm,
             "folder": folder, "base": base}
 
 
@@ -491,6 +497,26 @@ def scenario_dxf_fiducial_layer():
           "every CUT dxf carries its own ticks (empty: %s)" % (empty or "none"))
 
 
+_SEG_RE = re.compile(r'<path d="M ([-\d.]+) ([-\d.]+) L ([-\d.]+) ([-\d.]+)" />')
+
+
+def fiducial_segments(text):
+    """Every 2-point path inside a stroked ``fill="none"`` group.
+
+    In FILLED mode (the default here) a piece's cut outline is a single
+    ``fill="#color"`` compound path, so the ``fill="none" stroke="#color"``
+    group holds only fiducial ticks and crop marks -- exactly the marks under
+    test. The regex only matches a single-segment path, so a multi-vertex
+    outline can never be mistaken for one.
+    """
+    segs = []
+    for chunk in text.split('<g fill="none" stroke="#')[1:]:
+        body = chunk.split("</g>")[0]
+        segs.extend(tuple(float(v) for v in mt)
+                    for mt in _SEG_RE.findall(body))
+    return segs
+
+
 def cut_outline_is_stroked(text):
     """True iff a piece's CUT OUTLINE (not just its ticks) is stroked.
 
@@ -561,6 +587,79 @@ def scenario_stroked():
           "one-file output carries no fill-mode markers")
 
 
+def scenario_overlap_crop_marks():
+    """opts["tile_overlap_cm"] > 0 must put crop marks in the RENDERED file.
+
+    core's tile_piece() already has crop-mark coverage; what was missing (and
+    unreachable, since nothing ever set the opts key) is that they survive
+    _tile_to_piece -> fiducials -> SVG.
+
+    The discriminator is ORIENTATION, not presence. Crop marks and ordinary
+    seam ticks both render as single-segment paths in the same stroked group,
+    so "there are line segments" passes happily against overlap=0. On a piece
+    split by a VERTICAL grid line the two are perpendicular: a seam tick points
+    into the piece (horizontal), a crop mark runs along the line (vertical).
+    """
+    print("scenario_overlap_crop_marks (overlap > 0 -> crop marks rendered):")
+    # 20x20 fits the 12x24 bed at no rotation, so it must tile: 2 columns
+    # split by one vertical grid line.
+    sq = Profile([Loop(rect_pcs(0, 0, 20, 20), True)])
+    geo = dict(unit="cm", bed_w=12, bed_h=24, bed_w_cm=12, bed_h_cm=24)
+
+    def poster_opts(folder, base, **kw):
+        # Seam ticks deliberately sized so their RENDERED length differs from
+        # crop_len (0.6cm, which the add-in does not expose), otherwise the
+        # length assertion below would pass against an ordinary tick.
+        # fid_len_cm is the tick's FULL width across the seam and each piece
+        # draws half of it, so 2.0 renders as 1.0 per piece -- not 2.0.
+        o = opts(folder, base, **dict(geo, **kw))
+        o["fid_len_cm"] = 2.0
+        return o
+
+    d = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([sq]), [sq],
+                            poster_opts(d, "poster", overlap_cm=2.0))
+    files = sorted(os.listdir(d))
+    check(files == ["poster_A.svg", "poster_ASSEMBLY.svg", "poster_B.svg"],
+          "overlapped region tiled into 2 files (got %s)" % files)
+
+    for name in ("poster_A.svg", "poster_B.svg"):
+        segs = fiducial_segments(read(d, name))
+        check(len(segs) == 2, "%s carries exactly 2 crop marks (got %d)"
+              % (name, len(segs)))
+        check(segs and all(approx(x0, x1) for x0, _y0, x1, _y1 in segs),
+              "%s crop marks run ALONG the vertical grid line" % name)
+        check(segs and all(approx(abs(y1 - y0), 0.6) for _x0, y0, _x1, y1 in segs),
+              "%s crop marks are crop_len (0.6cm), not a half tick (1.0cm) -- "
+              "so a seam tick cannot satisfy this" % name)
+
+    # Control: the same geometry butt-jointed. Ticks must still be there but
+    # PERPENDICULAR -- this is the state the tool was stuck in, and every
+    # assertion above has to fail against it.
+    d2 = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([sq]), [sq], poster_opts(d2, "butt"))
+    ctl = fiducial_segments(read(d2, "butt_A.svg"))
+    check(ctl, "butt-joint control still has seam ticks (got %d)" % len(ctl))
+    check(all(approx(y0, y1) for _x0, y0, _x1, y1 in ctl),
+          "and they run PERPENDICULAR to the seam (horizontal), so the "
+          "orientation check above genuinely discriminates")
+    check(not any(approx(x0, x1) for x0, _y0, x1, _y1 in ctl),
+          "no butt-joint tick is vertical (nothing could masquerade as a "
+          "crop mark)")
+    check(all(approx(abs(x1 - x0), 1.0) for x0, _y0, x1, _y1 in ctl),
+          "and each renders at fid_len/2 = 1.0cm, so the length check "
+          "discriminates too")
+
+    # Crop marks ride the fiducial layer/color, so switching fiducials off
+    # takes them with it. Documents the coupling rather than asserting it is
+    # the right design.
+    d3 = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([sq]), [sq],
+                            poster_opts(d3, "nofid", fid=False, overlap_cm=2.0))
+    check(not fiducial_segments(read(d3, "nofid_A.svg")),
+          "fiducials OFF suppresses crop marks too (they share that layer)")
+
+
 def main():
     scenario_split()
     scenario_hole()
@@ -575,6 +674,7 @@ def main():
     scenario_dxf_fiducial_layer()
     scenario_trim()
     scenario_stroked()
+    scenario_overlap_crop_marks()
     print()
     if _fail:
         print("%d FAILURE(S)" % len(_fail))
