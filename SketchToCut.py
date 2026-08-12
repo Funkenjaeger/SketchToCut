@@ -577,10 +577,34 @@ def _build_final_pieces(sketch, target_profiles, opts):
                          "profiles (and slice them with lines), then run again.")
         return [], info
 
+    wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
+    tile_rot = opts.get("tile_rotation_deg", 0.0)
+    tile_min = opts.get("tile_min_size_cm", 0.0)
+    tile_overlap = opts.get("tile_overlap_cm", 0.0)   # 0 -> butt-joint (default)
+
+    # Precompute fit/tile status per survivor BEFORE the fiducial pass below,
+    # so that pass can tell whether a shared edge's other side is going to be
+    # tiled under nonzero overlap. Reused in the tiling loop further down so
+    # fit_rotation only runs once per survivor.
+    theta_by_survivor = [
+        fitlib.fit_rotation(p["cloud"], wc, hc, step_deg=FIT_STEP_DEG)
+        for p in survivors]
+
     if opts["fid_enabled"]:
         for k, idxs in key_to_pieces.items():
             if len(idxs) < 2:
                 continue  # only shared (cut) edges get fiducials
+            # If nonzero overlap means one side of this edge will be tiled,
+            # that tile does NOT get a matching half placed on it (see the
+            # gate in the tiling loop below -- crop marks register the sheet
+            # there instead). Placing this side's half anyway would orphan
+            # it: a lone tick is a group of one and _drop_unfitting_fiducials
+            # will not remove it. So skip BOTH halves together here, the same
+            # way the tiled side already skips its own. Fixes the 5-vs-0
+            # orphan measured on a 20x20 tiled region beside a 4x20 neighbour.
+            if tile_overlap != 0.0 and any(
+                    theta_by_survivor[i] is None for i in idxs):
+                continue
             pts = key_points.get(k)
             if not pts:
                 continue
@@ -591,14 +615,9 @@ def _build_final_pieces(sketch, target_profiles, opts):
                                       spacing=opts["fid_spacing_cm"],
                                       inset=opts["fid_inset_cm"]))
 
-    wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
-    tile_rot = opts.get("tile_rotation_deg", 0.0)
-    tile_min = opts.get("tile_min_size_cm", 0.0)
-    tile_overlap = opts.get("tile_overlap_cm", 0.0)   # 0 -> butt-joint (default)
-
     final, untileable, n_tiled = [], [], 0
-    for p in survivors:
-        theta = fitlib.fit_rotation(p["cloud"], wc, hc, step_deg=FIT_STEP_DEG)
+    for idx, p in enumerate(survivors):
+        theta = theta_by_survivor[idx]
         if theta is not None:
             p["_theta"] = theta
             final.append(p)
@@ -614,17 +633,18 @@ def _build_final_pieces(sketch, target_profiles, opts):
         # and pair up in _drop_unfitting_fiducials. (Skipped under overlap: there
         # the crop marks register the sheets and there is no butt seam.)
         #
-        # KNOWN GAP, now reachable: the neighbour's half of that seam is placed
-        # by the unguarded fiducial pass above, which does NOT check overlap. So
-        # with overlap > 0 a NON-tiled region abutting this one keeps its ticks
-        # while these tiles get none, and _drop_unfitting_fiducials will not
-        # remove them -- it only drops a group when a member's tip pokes out, and
-        # a lone tick is a group of one that fits. Measured: 5 ticks vs 0 on a
-        # 20x20 tiled region beside a 4x20 neighbour. Until overlap was wired to
-        # the dialog this was unreachable; it is now one spinner away. Fixing it
-        # means choosing whether the neighbour should also fall back to crop
-        # marks or whether these tiles should keep butt ticks on shared OUTER
-        # edges -- a design call, deliberately not made here.
+        # FIXED (previously a KNOWN GAP): the neighbour's half of that seam used
+        # to be placed unconditionally by the fiducial pass above, which did not
+        # check overlap -- so with overlap > 0 a NON-tiled region abutting this
+        # one kept its ticks while these tiles got none, and
+        # _drop_unfitting_fiducials would not remove the orphan (it only drops a
+        # group when a member's tip pokes out, and a lone tick is a group of one
+        # that fits). Measured 5 ticks vs 0 on a 20x20 tiled region beside a
+        # 4x20 neighbour. The pass above is now gated by the SAME
+        # theta_by_survivor / tile_overlap check as this one, so neither half is
+        # placed when overlap > 0 -- symmetric with this gate. Which side should
+        # instead grow its own crop marks is still a separate design call, left
+        # to Evan; this only removes the orphan.
         if opts["fid_enabled"] and tile_overlap == 0.0:
             for k in p["outer_keys"]:
                 if len(key_to_pieces.get(k, ())) < 2:

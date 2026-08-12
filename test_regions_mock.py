@@ -660,6 +660,51 @@ def scenario_overlap_crop_marks():
           "fiducials OFF suppresses crop marks too (they share that layer)")
 
 
+def scenario_orphan_ticks_fixed():
+    print("scenario_orphan_ticks_fixed (nonzero overlap must not orphan a "
+          "neighbour's shared-edge ticks):")
+    # 20x20 region forced to tile on a 12x24 bed, abutting an UNTILED 4x20
+    # neighbour along the shared x=20 edge. Regression for the defect
+    # recorded 2026-08-11: the tiling loop's gate (the
+    # `if opts["fid_enabled"] and tile_overlap == 0.0:` block) correctly
+    # withholds matched ticks from the TILE side when overlap > 0, but the
+    # untiled neighbour's half used to be placed unconditionally by the
+    # earlier fiducial pass, leaving orphans with nothing to align to --
+    # measured 5 ticks on the neighbour vs 0 on the tile.
+    big = Profile([Loop(rect_pcs(0, 0, 20, 20), True)])
+    neighbour = Profile([Loop(rect_pcs(20, 0, 24, 20), True)])
+
+    d = tempfile.mkdtemp()
+    o = opts(d, "orphan", unit="cm", bed_w=12, bed_h=24, bed_w_cm=12,
+             bed_h_cm=24, fid=True, overlap_cm=2.0)
+    m.run_per_region_export(Sketch([big, neighbour]), [big, neighbour], o)
+    files = [f for f in os.listdir(d) if "ASSEMBLY" not in f]
+    neighbour_files = [f for f in files if attr(read(d, f), "width") == "4cm"]
+    check(len(neighbour_files) == 1,
+          "exactly one output file is the untiled 4x20 neighbour (got %s)"
+          % neighbour_files)
+    if neighbour_files:
+        segs = fiducial_segments(read(d, neighbour_files[0]))
+        check(len(segs) == 0,
+              "neighbour carries NO orphaned shared-edge ticks under "
+              "nonzero overlap (got %d)" % len(segs))
+
+    # Control: same geometry at overlap=0 (butt joint) must still be
+    # matched -- this isn't "fixed" by breaking the ordinary case.
+    d0 = tempfile.mkdtemp()
+    o0 = opts(d0, "orphan0", unit="cm", bed_w=12, bed_h=24, bed_w_cm=12,
+              bed_h_cm=24, fid=True, overlap_cm=0.0)
+    m.run_per_region_export(Sketch([big, neighbour]), [big, neighbour], o0)
+    files0 = [f for f in os.listdir(d0) if "ASSEMBLY" not in f]
+    neighbour_files0 = [f for f in files0 if attr(read(d0, f), "width") == "4cm"]
+    check(len(neighbour_files0) == 1, "control: neighbour file still identifiable")
+    if neighbour_files0:
+        segs0 = fiducial_segments(read(d0, neighbour_files0[0]))
+        check(len(segs0) > 0,
+              "control (overlap=0): neighbour still carries its matched "
+              "shared-edge ticks (got %d)" % len(segs0))
+
+
 def main():
     scenario_split()
     scenario_hole()
@@ -675,6 +720,7 @@ def main():
     scenario_trim()
     scenario_stroked()
     scenario_overlap_crop_marks()
+    scenario_orphan_ticks_fixed()
     print()
     if _fail:
         print("%d FAILURE(S)" % len(_fail))
