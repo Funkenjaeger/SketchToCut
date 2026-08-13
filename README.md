@@ -25,6 +25,11 @@ quoting is otherwise fiddly. This makes it one click.
   piece a distinct color, with fiducials in the same color so they cut together;
   red is reserved for the piece letters.
 * **SVG** (vinyl) or **DXF** (R12, laser/SendCutSend) output.
+* **Fill shapes** (SVG only, on by default) — uncheck it to emit **stroked
+  outlines** in the piece color instead of filled artwork, for a cutter driven
+  off contour lines rather than fills. Holes become their own stroked contours
+  rather than an even-odd mask. The `ASSEMBLY` reference stays filled either
+  way: it is a map to read, not a file to cut.
 * Holes preserved; a bolt-hole disc is not emitted as a spurious piece.
 * Each piece **auto-rotated** to fit a user **max bed size**; regions too big to
   fit at any rotation are **auto-tiled** into bed-sized tiles, with a **min tile
@@ -36,6 +41,12 @@ quoting is otherwise fiddly. This makes it one click.
   they stay with their piece in the piece's color, so a color-separating vinyl
   cutter cuts them together. The `ASSEMBLY` reference carries no fiducials —
   they would vanish under the filled shapes.
+* **Tile overlap** (output units, default `0` = butt joint). Above zero, adjacent
+  tiles share a margin that wide and carry **crop marks** — short trim guides on
+  the nominal grid line, identical on both tiles, so overlaying the sheets and
+  lining the marks up registers them. Overlapped tiles carry no butt-seam
+  fiducials: there is no shared seam to match ticks on. Crop marks ride the same
+  layer/color as the fiducials, so turning fiducials off suppresses them too.
 * Dialog settings are **remembered** between runs.
 
 ## Example

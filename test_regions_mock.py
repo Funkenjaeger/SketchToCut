@@ -174,13 +174,19 @@ def attr(text, name):
     return mt.group(1) if mt else None
 
 
+def approx(a, b, tol=1e-6):
+    return abs(a - b) <= tol
+
+
 def opts(folder, base, unit="mm", bed_w=6.0, bed_h=6.0, bed_w_cm=6.0,
-         bed_h_cm=6.0, fid=True, labels=False, fmt="svg"):
+         bed_h_cm=6.0, fid=True, labels=False, fmt="svg", filled=True,
+         overlap_cm=0.0):
     return {"unit": unit, "stroke_width": 0.01, "fmt": fmt,
             "bed_w": bed_w, "bed_h": bed_h,
             "bed_w_cm": bed_w_cm, "bed_h_cm": bed_h_cm, "fid_enabled": fid,
             "fid_len_cm": 0.6, "fid_spacing_cm": 5.0, "fid_inset_cm": 0.3,
-            "fid_color": "red", "label_on_pieces": labels,
+            "fid_color": "red", "label_on_pieces": labels, "filled": filled,
+            "tile_overlap_cm": overlap_cm,
             "folder": folder, "base": base}
 
 
@@ -491,6 +497,214 @@ def scenario_dxf_fiducial_layer():
           "every CUT dxf carries its own ticks (empty: %s)" % (empty or "none"))
 
 
+_SEG_RE = re.compile(r'<path d="M ([-\d.]+) ([-\d.]+) L ([-\d.]+) ([-\d.]+)" />')
+
+
+def fiducial_segments(text):
+    """Every 2-point path inside a stroked ``fill="none"`` group.
+
+    In FILLED mode (the default here) a piece's cut outline is a single
+    ``fill="#color"`` compound path, so the ``fill="none" stroke="#color"``
+    group holds only fiducial ticks and crop marks -- exactly the marks under
+    test. The regex only matches a single-segment path, so a multi-vertex
+    outline can never be mistaken for one.
+    """
+    segs = []
+    for chunk in text.split('<g fill="none" stroke="#')[1:]:
+        body = chunk.split("</g>")[0]
+        segs.extend(tuple(float(v) for v in mt)
+                    for mt in _SEG_RE.findall(body))
+    return segs
+
+
+def cut_outline_is_stroked(text):
+    """True iff a piece's CUT OUTLINE (not just its ticks) is stroked.
+
+    ``'fill="none" stroke="#..."'`` alone proves nothing: filled mode emits
+    exactly that group for a piece's fiducial ticks. The discriminator is what
+    is INSIDE the group -- ticks are open lines, whereas a cut outline is a
+    closed path (``Z``). A mutation test caught the weaker form passing against
+    the very bug it was written to detect.
+    """
+    for chunk in text.split('<g fill="none" stroke="#')[1:]:
+        if "Z" in chunk.split("</g>")[0]:
+            return True
+    return False
+
+
+def scenario_stroked():
+    """opts["filled"]=False must reach the SVG, through the real export path.
+
+    The unit test covers render_pieces itself; this covers the WIRING -- every
+    call site used to hardcode filled=True, so the un-filled renderer was
+    complete but unreachable. Drives both export modes so neither regresses.
+    """
+    print("scenario_stroked (opts filled=False -> stroked cut files):")
+    left = Profile([Loop([line_pc((0, 0), (5, 0)), line_pc((5, 0), (5, 4)),
+                          line_pc((5, 4), (0, 4)), line_pc((0, 4), (0, 0))], True)])
+    right = Profile([Loop([line_pc((5, 0), (10, 0)), line_pc((10, 0), (10, 4)),
+                           line_pc((10, 4), (5, 4)), line_pc((5, 4), (5, 0))], True)])
+
+    d = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([left, right]), [left, right],
+                            opts(d, "stroked", unit="cm", bed_w=24, bed_h=24,
+                                 bed_w_cm=24, bed_h_cm=24, filled=False))
+    a = read(d, "stroked_A.svg")
+    check(cut_outline_is_stroked(a),
+          "per-region piece's cut outline is inside a stroked group")
+    check('stroke="none"' not in a and 'fill-rule="evenodd"' not in a,
+          "per-region piece carries no fill-mode markers")
+    check('fill="#' not in a, "no piece color is painted as a fill")
+
+    # The ASSEMBLY is a human-readable map, not a cut file: it stays filled
+    # on purpose even when the cut files are stroked.
+    assembly = read(d, "stroked_ASSEMBLY.svg")
+    check('fill="#' in assembly and 'stroke="none"' in assembly,
+          "ASSEMBLY stays filled (it is a reference, never cut)")
+
+    # Same geometry with the default opts must still come out filled --
+    # proves the scenario is reading the flag, not just describing the tool.
+    d2 = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([left, right]), [left, right],
+                            opts(d2, "ctl", unit="cm", bed_w=24, bed_h=24,
+                                 bed_w_cm=24, bed_h_cm=24))
+    ctl = read(d2, "ctl_A.svg")
+    check('fill="#' in ctl and 'stroke="none"' in ctl,
+          "the default (filled) control case is unchanged")
+    check(not cut_outline_is_stroked(ctl),
+          "and the stroked-outline probe reads FALSE on it (the probe "
+          "discriminates rather than always passing)")
+
+    # One-file mode threads the same flag through a different call site.
+    d3 = tempfile.mkdtemp()
+    m.run_one_file_export(Sketch([left, right]), [left, right],
+                          opts(d3, "onestroke", unit="cm", bed_w=24, bed_h=24,
+                               bed_w_cm=24, bed_h_cm=24, filled=False))
+    one = read(d3, "onestroke.svg")
+    check(cut_outline_is_stroked(one),
+          "one-file output's cut outline is stroked too")
+    check('stroke="none"' not in one and 'fill-rule="evenodd"' not in one,
+          "one-file output carries no fill-mode markers")
+
+
+def scenario_overlap_crop_marks():
+    """opts["tile_overlap_cm"] > 0 must put crop marks in the RENDERED file.
+
+    core's tile_piece() already has crop-mark coverage; what was missing (and
+    unreachable, since nothing ever set the opts key) is that they survive
+    _tile_to_piece -> fiducials -> SVG.
+
+    The discriminator is ORIENTATION, not presence. Crop marks and ordinary
+    seam ticks both render as single-segment paths in the same stroked group,
+    so "there are line segments" passes happily against overlap=0. On a piece
+    split by a VERTICAL grid line the two are perpendicular: a seam tick points
+    into the piece (horizontal), a crop mark runs along the line (vertical).
+    """
+    print("scenario_overlap_crop_marks (overlap > 0 -> crop marks rendered):")
+    # 20x20 fits the 12x24 bed at no rotation, so it must tile: 2 columns
+    # split by one vertical grid line.
+    sq = Profile([Loop(rect_pcs(0, 0, 20, 20), True)])
+    geo = dict(unit="cm", bed_w=12, bed_h=24, bed_w_cm=12, bed_h_cm=24)
+
+    def poster_opts(folder, base, **kw):
+        # Seam ticks deliberately sized so their RENDERED length differs from
+        # crop_len (0.6cm, which the add-in does not expose), otherwise the
+        # length assertion below would pass against an ordinary tick.
+        # fid_len_cm is the tick's FULL width across the seam and each piece
+        # draws half of it, so 2.0 renders as 1.0 per piece -- not 2.0.
+        o = opts(folder, base, **dict(geo, **kw))
+        o["fid_len_cm"] = 2.0
+        return o
+
+    d = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([sq]), [sq],
+                            poster_opts(d, "poster", overlap_cm=2.0))
+    files = sorted(os.listdir(d))
+    check(files == ["poster_A.svg", "poster_ASSEMBLY.svg", "poster_B.svg"],
+          "overlapped region tiled into 2 files (got %s)" % files)
+
+    for name in ("poster_A.svg", "poster_B.svg"):
+        segs = fiducial_segments(read(d, name))
+        check(len(segs) == 2, "%s carries exactly 2 crop marks (got %d)"
+              % (name, len(segs)))
+        check(segs and all(approx(x0, x1) for x0, _y0, x1, _y1 in segs),
+              "%s crop marks run ALONG the vertical grid line" % name)
+        check(segs and all(approx(abs(y1 - y0), 0.6) for _x0, y0, _x1, y1 in segs),
+              "%s crop marks are crop_len (0.6cm), not a half tick (1.0cm) -- "
+              "so a seam tick cannot satisfy this" % name)
+
+    # Control: the same geometry butt-jointed. Ticks must still be there but
+    # PERPENDICULAR -- this is the state the tool was stuck in, and every
+    # assertion above has to fail against it.
+    d2 = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([sq]), [sq], poster_opts(d2, "butt"))
+    ctl = fiducial_segments(read(d2, "butt_A.svg"))
+    check(ctl, "butt-joint control still has seam ticks (got %d)" % len(ctl))
+    check(all(approx(y0, y1) for _x0, y0, _x1, y1 in ctl),
+          "and they run PERPENDICULAR to the seam (horizontal), so the "
+          "orientation check above genuinely discriminates")
+    check(not any(approx(x0, x1) for x0, _y0, x1, _y1 in ctl),
+          "no butt-joint tick is vertical (nothing could masquerade as a "
+          "crop mark)")
+    check(all(approx(abs(x1 - x0), 1.0) for x0, _y0, x1, _y1 in ctl),
+          "and each renders at fid_len/2 = 1.0cm, so the length check "
+          "discriminates too")
+
+    # Crop marks ride the fiducial layer/color, so switching fiducials off
+    # takes them with it. Documents the coupling rather than asserting it is
+    # the right design.
+    d3 = tempfile.mkdtemp()
+    m.run_per_region_export(Sketch([sq]), [sq],
+                            poster_opts(d3, "nofid", fid=False, overlap_cm=2.0))
+    check(not fiducial_segments(read(d3, "nofid_A.svg")),
+          "fiducials OFF suppresses crop marks too (they share that layer)")
+
+
+def scenario_orphan_ticks_fixed():
+    print("scenario_orphan_ticks_fixed (nonzero overlap must not orphan a "
+          "neighbour's shared-edge ticks):")
+    # 20x20 region forced to tile on a 12x24 bed, abutting an UNTILED 4x20
+    # neighbour along the shared x=20 edge. Regression for the defect
+    # recorded 2026-08-11: the tiling loop's gate (the
+    # `if opts["fid_enabled"] and tile_overlap == 0.0:` block) correctly
+    # withholds matched ticks from the TILE side when overlap > 0, but the
+    # untiled neighbour's half used to be placed unconditionally by the
+    # earlier fiducial pass, leaving orphans with nothing to align to --
+    # measured 5 ticks on the neighbour vs 0 on the tile.
+    big = Profile([Loop(rect_pcs(0, 0, 20, 20), True)])
+    neighbour = Profile([Loop(rect_pcs(20, 0, 24, 20), True)])
+
+    d = tempfile.mkdtemp()
+    o = opts(d, "orphan", unit="cm", bed_w=12, bed_h=24, bed_w_cm=12,
+             bed_h_cm=24, fid=True, overlap_cm=2.0)
+    m.run_per_region_export(Sketch([big, neighbour]), [big, neighbour], o)
+    files = [f for f in os.listdir(d) if "ASSEMBLY" not in f]
+    neighbour_files = [f for f in files if attr(read(d, f), "width") == "4cm"]
+    check(len(neighbour_files) == 1,
+          "exactly one output file is the untiled 4x20 neighbour (got %s)"
+          % neighbour_files)
+    if neighbour_files:
+        segs = fiducial_segments(read(d, neighbour_files[0]))
+        check(len(segs) == 0,
+              "neighbour carries NO orphaned shared-edge ticks under "
+              "nonzero overlap (got %d)" % len(segs))
+
+    # Control: same geometry at overlap=0 (butt joint) must still be
+    # matched -- this isn't "fixed" by breaking the ordinary case.
+    d0 = tempfile.mkdtemp()
+    o0 = opts(d0, "orphan0", unit="cm", bed_w=12, bed_h=24, bed_w_cm=12,
+              bed_h_cm=24, fid=True, overlap_cm=0.0)
+    m.run_per_region_export(Sketch([big, neighbour]), [big, neighbour], o0)
+    files0 = [f for f in os.listdir(d0) if "ASSEMBLY" not in f]
+    neighbour_files0 = [f for f in files0 if attr(read(d0, f), "width") == "4cm"]
+    check(len(neighbour_files0) == 1, "control: neighbour file still identifiable")
+    if neighbour_files0:
+        segs0 = fiducial_segments(read(d0, neighbour_files0[0]))
+        check(len(segs0) > 0,
+              "control (overlap=0): neighbour still carries its matched "
+              "shared-edge ticks (got %d)" % len(segs0))
+
+
 def main():
     scenario_split()
     scenario_hole()
@@ -504,6 +718,9 @@ def main():
     scenario_dxf()
     scenario_dxf_fiducial_layer()
     scenario_trim()
+    scenario_stroked()
+    scenario_overlap_crop_marks()
+    scenario_orphan_ticks_fixed()
     print()
     if _fail:
         print("%d FAILURE(S)" % len(_fail))

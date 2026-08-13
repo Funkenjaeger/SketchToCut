@@ -124,9 +124,14 @@ def _render_pieces_doc(piece_groups, unit, fmt, stroke_width, filled=True,
                        labels=None):
     """Render piece groups to the chosen format; returns (text, extension).
 
-    SVG uses filled shapes with per-piece color, fiducials stroked in that
-    same color (so they cut together on a vinyl cutter that separates by
-    color) -- fiducials stay embedded per-piece for that format.
+    SVG defaults to filled shapes with per-piece color, fiducials stroked in
+    that same color (so they cut together on a vinyl cutter that separates by
+    color) -- fiducials stay embedded per-piece for that format. With
+    ``filled=False`` (the dialog's "Fill shapes" unchecked) every outline is
+    stroked in the piece color instead, which is what a cutter driven off
+    contour lines rather than filled artwork expects.
+
+    ``filled`` is SVG-only: DXF is wireframe by nature and ignores it.
 
     DXF stays wireframe (laser cuts paths, not fills) with each piece's cut
     geometry on its own layer/color, but fiducial ticks go on the shared
@@ -572,10 +577,34 @@ def _build_final_pieces(sketch, target_profiles, opts):
                          "profiles (and slice them with lines), then run again.")
         return [], info
 
+    wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
+    tile_rot = opts.get("tile_rotation_deg", 0.0)
+    tile_min = opts.get("tile_min_size_cm", 0.0)
+    tile_overlap = opts.get("tile_overlap_cm", 0.0)   # 0 -> butt-joint (default)
+
+    # Precompute fit/tile status per survivor BEFORE the fiducial pass below,
+    # so that pass can tell whether a shared edge's other side is going to be
+    # tiled under nonzero overlap. Reused in the tiling loop further down so
+    # fit_rotation only runs once per survivor.
+    theta_by_survivor = [
+        fitlib.fit_rotation(p["cloud"], wc, hc, step_deg=FIT_STEP_DEG)
+        for p in survivors]
+
     if opts["fid_enabled"]:
         for k, idxs in key_to_pieces.items():
             if len(idxs) < 2:
                 continue  # only shared (cut) edges get fiducials
+            # If nonzero overlap means one side of this edge will be tiled,
+            # that tile does NOT get a matching half placed on it (see the
+            # gate in the tiling loop below -- crop marks register the sheet
+            # there instead). Placing this side's half anyway would orphan
+            # it: a lone tick is a group of one and _drop_unfitting_fiducials
+            # will not remove it. So skip BOTH halves together here, the same
+            # way the tiled side already skips its own. Fixes the 5-vs-0
+            # orphan measured on a 20x20 tiled region beside a 4x20 neighbour.
+            if tile_overlap != 0.0 and any(
+                    theta_by_survivor[i] is None for i in idxs):
+                continue
             pts = key_points.get(k)
             if not pts:
                 continue
@@ -586,14 +615,9 @@ def _build_final_pieces(sketch, target_profiles, opts):
                                       spacing=opts["fid_spacing_cm"],
                                       inset=opts["fid_inset_cm"]))
 
-    wc, hc = opts["bed_w_cm"], opts["bed_h_cm"]
-    tile_rot = opts.get("tile_rotation_deg", 0.0)
-    tile_min = opts.get("tile_min_size_cm", 0.0)
-    tile_overlap = opts.get("tile_overlap_cm", 0.0)   # 0 -> butt-joint (default)
-
     final, untileable, n_tiled = [], [], 0
-    for p in survivors:
-        theta = fitlib.fit_rotation(p["cloud"], wc, hc, step_deg=FIT_STEP_DEG)
+    for idx, p in enumerate(survivors):
+        theta = theta_by_survivor[idx]
         if theta is not None:
             p["_theta"] = theta
             final.append(p)
@@ -608,6 +632,19 @@ def _build_final_pieces(sketch, target_profiles, opts):
         # (key_points[k]) in the fiducial pass above, so the base points coincide
         # and pair up in _drop_unfitting_fiducials. (Skipped under overlap: there
         # the crop marks register the sheets and there is no butt seam.)
+        #
+        # FIXED (previously a KNOWN GAP): the neighbour's half of that seam used
+        # to be placed unconditionally by the fiducial pass above, which did not
+        # check overlap -- so with overlap > 0 a NON-tiled region abutting this
+        # one kept its ticks while these tiles got none, and
+        # _drop_unfitting_fiducials would not remove the orphan (it only drops a
+        # group when a member's tip pokes out, and a lone tick is a group of one
+        # that fits). Measured 5 ticks vs 0 on a 20x20 tiled region beside a
+        # 4x20 neighbour. The pass above is now gated by the SAME
+        # theta_by_survivor / tile_overlap check as this one, so neither half is
+        # placed when overlap > 0 -- symmetric with this gate. Which side should
+        # instead grow its own crop marks is still a separate design call, left
+        # to Evan; this only removes the orphan.
         if opts["fid_enabled"] and tile_overlap == 0.0:
             for k in p["outer_keys"]:
                 if len(key_to_pieces.get(k, ())) < 2:
@@ -666,6 +703,11 @@ def _write_assembly(final, opts, unit, sw, fmt, folder, base):
 
     Uses each piece's palette color (matching the cut files) so you can map a
     color back to where it belongs. No fiducials (they'd vanish on the fills).
+
+    Stays filled even when the cut files are stroked (``opts["filled"]`` is
+    False): this is a human-readable map, never fed to the machine, and solid
+    color blocks are what make the piece-to-position mapping readable at a
+    glance. Only the cut files follow the dialog's fill setting.
     """
     apgs = [_piece_group(p, rotate=False, with_fiducials=False) for p in final]
     labels = [(p["letter"], p["centroid"], _label_height_cm(p["outer"]))
@@ -684,6 +726,7 @@ def run_per_region_export(sketch, target_profiles, opts):
 
     unit, sw = opts["unit"], opts["stroke_width"]
     fmt = opts.get("fmt", "svg")
+    filled = opts.get("filled", True)
     folder, base = opts["folder"], opts["base"]
     single = len(final) == 1
 
@@ -692,7 +735,8 @@ def run_per_region_export(sketch, target_profiles, opts):
         pg = _piece_group(p, rotate=True)
         lbls = ([(p["letter"], p["centroid"], _label_height_cm(p["outer"]))]
                 if opts["label_on_pieces"] and not single else None)
-        doc, ext = _render_pieces_doc([pg], unit, fmt, sw, filled=True, labels=lbls)
+        doc, ext = _render_pieces_doc([pg], unit, fmt, sw, filled=filled,
+                                      labels=lbls)
         fname = "%s.%s" % (base, ext) if single \
             else "%s_%s.%s" % (base, p["letter"], ext)
         with open(os.path.join(folder, fname), "w", encoding="utf-8") as fp:
@@ -737,6 +781,7 @@ def run_one_file_export(sketch, target_profiles, opts):
 
     unit, sw = opts["unit"], opts["stroke_width"]
     fmt = opts.get("fmt", "svg")
+    filled = opts.get("filled", True)
     axis = opts.get("arrange_axis", "Y")
     folder, base = opts["folder"], opts["base"]
     gap = 0.5  # cm between packed pieces
@@ -764,7 +809,7 @@ def run_one_file_export(sketch, target_profiles, opts):
                 labels.append((p["letter"],
                                (center[0] + pl.dx, center[1] + pl.dy),
                                _label_height_cm(p["outer"])))
-        doc, ext = _render_pieces_doc(piece_groups, unit, fmt, sw, filled=True,
+        doc, ext = _render_pieces_doc(piece_groups, unit, fmt, sw, filled=filled,
                                       labels=labels or None)
         fname = _sheet_name(base, ext, bi, len(bins))
         with open(os.path.join(folder, fname), "w", encoding="utf-8") as fp:
@@ -853,9 +898,13 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             "fid_spacing_cm": inputs.itemById("fidSpacing").value / 10.0,
             "fid_inset_cm": 0.3,
             "fid_color": "red",
+            "filled": inputs.itemById("fillShapes").value,
             "label_on_pieces": inputs.itemById("labelPieces").value,
             "tile_rotation_deg": inputs.itemById("tileRotation").value,
             "tile_min_size_cm": inputs.itemById("tileMinSize").value / s,
+            # `/ s` converts output units -> cm, matching the *_cm key name.
+            # Dropping it would read 0.5 in as 0.5 cm: a silent 2.54x error.
+            "tile_overlap_cm": inputs.itemById("tileOverlap").value / s,
             "arrange_axis": ("X" if inputs.itemById("arrangeAxis").selectedItem.index == 1
                              else "Y"),
             "folder": folder, "base": base,
@@ -920,6 +969,16 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
                 "strokeWidth", "Stroke width (output units)",
                 "", 0.0, 10.0, 0.005, 0.01)
 
+            # Filled vs stroked cut files (SVG only -- DXF is always wireframe).
+            # Checked keeps the long-standing filled output; unchecked emits
+            # stroked outlines, which is what a vinyl cutter's contour-cut
+            # wants. Deliberately positive-sense so the value maps straight to
+            # render_pieces(filled=...) with no negation anywhere in between.
+            inputs.addBoolValueInput(
+                "fillShapes",
+                "Fill shapes -- SVG only (uncheck for stroked outlines, "
+                "e.g. vinyl cutter)", True, "", True)
+
             grp = inputs.addGroupCommandInput("perRegion", "Bed / fiducials / tiling")
             grp.isExpanded = True
             gi = grp.children
@@ -939,6 +998,15 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             gi.addFloatSpinnerCommandInput(
                 "tileMinSize", "Min tile size (output units, 0=off)",
                 "", 0.0, 10000.0, 0.5, 0.0)
+            # Poster overlap between tiles. Output units like the bed/min-tile
+            # spinners beside it (NOT mm like the fiducial ones) -- the opts key
+            # is *_cm and the conversion happens there, so the label and the
+            # divisor have to agree. Defaults to 0 = butt joint: that is what
+            # every run has produced until now, and a nonzero default would
+            # silently grow tiles and switch off the matched seam ticks.
+            gi.addFloatSpinnerCommandInput(
+                "tileOverlap", "Tile overlap (output units, 0=butt joint)",
+                "", 0.0, 10000.0, 0.25, 0.0)
 
             inputs.addTextBoxCommandInput(
                 "hint", "",
